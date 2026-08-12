@@ -2,7 +2,11 @@
 set -eu
 
 DATA_DIR="${RAILWAY_VOLUME_MOUNT_PATH:-${DATA_DIR:-/data}}"
-PORT="${PORT:-8080}"
+# Railway may inject PORT from the TCP service exposure. Keep the HTTP edge
+# listener independent so a TCP proxy on 10085 cannot move the website onto
+# the REALITY port.
+RAILWAY_INJECTED_PORT="${PORT:-}"
+PORT="${PUBLIC_HTTP_PORT:-8080}"
 XRAY_PORT="${XRAY_PORT:-10085}"
 XRAY_LISTEN="${XRAY_LISTEN:-0.0.0.0}"
 CONFIG="${XRAY_CONFIG:-/etc/xray/config.json}"
@@ -20,8 +24,7 @@ RAILWAY_TCP_APPLICATION_PORT_VALUE="${RAILWAY_TCP_APPLICATION_PORT:-}"
 # 2. XRAY_TCP_PROXY_* is authoritative for REALITY.
 # 3. Railway metadata is accepted when it targets Xray 10085. If Railway
 #    exposes DOMAIN/PORT but omits APPLICATION_PORT, this single-service
-#    deployment treats that endpoint as the REALITY TCP endpoint. A known
-#    target of public HTTP 8080 is never advertised as REALITY.
+#    deployment treats that endpoint as the REALITY TCP endpoint.
 SERVER_HOST="${SERVER_HOST:-${TCP_PROXY_HOST:-}}"
 SERVER_PORT="${SERVER_PORT:-${TCP_PROXY_PORT:-}}"
 
@@ -33,10 +36,6 @@ if [ -n "${XRAY_TCP_PROXY_HOST:-}" ] || [ -n "${XRAY_TCP_PROXY_PORT:-}" ]; then
   case "$XRAY_TCP_PROXY_PORT" in ''|*[!0-9]*) echo "ERROR: XRAY_TCP_PROXY_PORT must be numeric" >&2; exit 1;; esac
   if [ "$XRAY_TCP_PROXY_PORT" -ne "$XRAY_PORT" ]; then
     echo "ERROR: dedicated TCP proxy target must be Xray port $XRAY_PORT; got $XRAY_TCP_PROXY_PORT" >&2
-    exit 1
-  fi
-  if [ "$XRAY_TCP_PROXY_PORT" -eq "$PORT" ]; then
-    echo "ERROR: dedicated TCP proxy cannot target public HTTP port $PORT" >&2
     exit 1
   fi
   SERVER_HOST="$XRAY_TCP_PROXY_HOST"
@@ -77,7 +76,7 @@ if [ $(( ${#SHORT_ID} % 2 )) -ne 0 ] || [ ${#SHORT_ID} -gt 16 ]; then
   exit 1
 fi
 if [ "$XRAY_PORT" = "$PORT" ]; then
-  echo "ERROR: XRAY_PORT must differ from public PORT" >&2
+  echo "ERROR: XRAY_PORT must differ from public HTTP port" >&2
   exit 1
 fi
 
@@ -152,7 +151,10 @@ fi
 case "$SUBSCRIPTION_TOKEN" in *[!A-Za-z0-9_-]*|'') echo "ERROR: invalid subscription token" >&2; exit 1;; esac
 chmod 0600 "$SUB_TOKEN_FILE"
 
-export DATA_DIR PORT XRAY_PORT XRAY_LISTEN CONFIG REALITY_TARGET REALITY_SNI REALITY_FINGERPRINT XHTTP_PATH XHTTP_MODE SHORT_ID UUID PRIVATE_KEY PUBLIC_KEY VLESS_DECRYPTION VLESS_ENCRYPTION SERVER_HOST SERVER_PORT SUBSCRIPTION_TOKEN TCP_PROXY_PROTOCOL XRAY_READY_FILE="$READY_FILE"
+# Keep PORT=8080 for the public HTTP service and expose the Railway-injected
+# value separately for diagnostics. generate.py therefore sees the real HTTP
+# port and can correctly distinguish a TCP proxy targeting 10085.
+export PORT RAILWAY_INJECTED_PORT DATA_DIR XRAY_PORT XRAY_LISTEN CONFIG REALITY_TARGET REALITY_SNI REALITY_FINGERPRINT XHTTP_PATH XHTTP_MODE SHORT_ID UUID PRIVATE_KEY PUBLIC_KEY VLESS_DECRYPTION VLESS_ENCRYPTION SERVER_HOST SERVER_PORT SUBSCRIPTION_TOKEN TCP_PROXY_PROTOCOL XRAY_READY_FILE="$READY_FILE"
 
 python3 /opt/xray/scripts/health_proxy.py & HEALTH_PID=$!
 cleanup(){
@@ -164,6 +166,7 @@ cleanup(){
 }
 trap cleanup INT TERM EXIT
 
+echo "Railway injected PORT: ${RAILWAY_INJECTED_PORT:-unset}; public HTTP port: $PORT; Xray TCP port: $XRAY_PORT" >&2
 echo "TCP subscription endpoint: ${SERVER_HOST:-disabled}" >&2
 echo "Railway TCP application port reported: ${RAILWAY_TCP_APPLICATION_PORT_VALUE:-unset}; Xray port: ${XRAY_PORT}" >&2
 echo "TCP PROXY protocol mode: $TCP_PROXY_PROTOCOL" >&2
