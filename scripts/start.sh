@@ -12,8 +12,15 @@ REALITY_FINGERPRINT="${REALITY_FINGERPRINT:-chrome}"
 XHTTP_PATH="${XHTTP_PATH:-/xhttp}"
 XHTTP_MODE="${XHTTP_MODE:-auto}"
 SHORT_ID="${SHORT_ID:-50175c035ee132}"
-SERVER_HOST="${SERVER_HOST:-${RAILWAY_TCP_PROXY_DOMAIN:-}}"
-SERVER_PORT="${SERVER_PORT:-${RAILWAY_TCP_PROXY_PORT:-}}"
+# Explicit values take precedence. Railway's singular TCP proxy variables are
+# ambiguous when more than one TCP proxy exists on the same service.
+SERVER_HOST="${SERVER_HOST:-${TCP_PROXY_HOST:-}}"
+SERVER_PORT="${SERVER_PORT:-${TCP_PROXY_PORT:-}}"
+RAILWAY_TCP_APPLICATION_PORT_VALUE="${RAILWAY_TCP_APPLICATION_PORT:-}"
+if [ -z "$SERVER_HOST" ] && [ -z "$SERVER_PORT" ]; then
+  SERVER_HOST="${RAILWAY_TCP_PROXY_DOMAIN:-}"
+  SERVER_PORT="${RAILWAY_TCP_PROXY_PORT:-}"
+fi
 READY_FILE="$DATA_DIR/.xray-ready"
 SUB_TOKEN_FILE="$DATA_DIR/subscription_token.txt"
 HEALTH_PID=""
@@ -27,6 +34,17 @@ if [ $(( ${#SHORT_ID} % 2 )) -ne 0 ] || [ ${#SHORT_ID} -gt 16 ]; then
 fi
 if [ "$XRAY_PORT" = "$PORT" ]; then
   echo "ERROR: XRAY_PORT must differ from public PORT" >&2
+  exit 1
+fi
+# A service may have multiple Railway TCP proxies, but Railway exposes only
+# one singular RAILWAY_TCP_PROXY_* pair to the process. Never silently publish
+# a subscription for a proxy targeting the HTTP port.
+if [ -n "$RAILWAY_TCP_APPLICATION_PORT_VALUE" ] && [ "$RAILWAY_TCP_APPLICATION_PORT_VALUE" != "$XRAY_PORT" ] && [ -z "${TCP_PROXY_HOST:-}" ] && [ -z "${TCP_PROXY_PORT:-}" ] && [ -z "${SERVER_HOST:-}" ] && [ -z "${SERVER_PORT:-}" ]; then
+  echo "ERROR: Railway TCP proxy target is ${RAILWAY_TCP_APPLICATION_PORT_VALUE}, but Xray listens on ${XRAY_PORT}. Remove the stale TCP proxy or set TCP_PROXY_HOST/TCP_PROXY_PORT to the proxy targeting ${XRAY_PORT}." >&2
+  exit 1
+fi
+if [ -z "$SERVER_HOST" ] || [ -z "$SERVER_PORT" ]; then
+  echo "ERROR: no TCP proxy endpoint is available for subscription generation" >&2
   exit 1
 fi
 
@@ -115,14 +133,12 @@ cleanup(){
 }
 trap cleanup INT TERM EXIT
 
-if [ -n "$SERVER_HOST" ] && [ -n "$SERVER_PORT" ]; then
-  echo "VLESS Encryption: ML-KEM-768 (Post-Quantum) enabled" >&2
-  echo "REALITY target: $REALITY_TARGET" >&2
-  python3 /opt/xray/scripts/generate.py
-else
-  echo "WARNING: Railway TCP Proxy is not configured; website and health will run, but subscription will remain unavailable." >&2
-  python3 /opt/xray/scripts/generate.py --no-subscription
-fi
+echo "TCP subscription endpoint: ${SERVER_HOST}:${SERVER_PORT}" >&2
+echo "Railway TCP application port reported: ${RAILWAY_TCP_APPLICATION_PORT_VALUE:-unset}; Xray port: ${XRAY_PORT}" >&2
+
+echo "VLESS Encryption: ML-KEM-768 (Post-Quantum) enabled" >&2
+echo "REALITY target: $REALITY_TARGET" >&2
+python3 /opt/xray/scripts/generate.py
 
 xray run -test -config "$CONFIG"
 echo "Starting Xray on ${XRAY_LISTEN}:$XRAY_PORT; public HTTP listener is 0.0.0.0:$PORT" >&2
@@ -144,13 +160,10 @@ fi
 touch "$READY_FILE"
 
 PUBLIC_DOMAIN="${RAILWAY_PUBLIC_DOMAIN:-}"
-if [ -n "$PUBLIC_DOMAIN" ] && [ -n "$SERVER_HOST" ] && [ -n "$SERVER_PORT" ]; then
+if [ -n "$PUBLIC_DOMAIN" ]; then
   printf 'https://%s/sub/%s\n' "$PUBLIC_DOMAIN" "$SUBSCRIPTION_TOKEN" > "$DATA_DIR/subscription_url.txt"
   chmod 0600 "$DATA_DIR/subscription_url.txt"
   echo "Subscription URL saved to /data/subscription_url.txt (token redacted from logs)" >&2
-fi
-if [ -n "$SERVER_HOST" ] && [ -n "$SERVER_PORT" ]; then
-  echo "TCP Proxy configured: ${SERVER_HOST}:${SERVER_PORT}" >&2
 fi
 echo "Website: ${PUBLIC_DOMAIN:+https://$PUBLIC_DOMAIN/}" >&2
 echo "Xray ready; HTTP port=$PORT; Xray TCP port=$XRAY_PORT listen=$XRAY_LISTEN" >&2
