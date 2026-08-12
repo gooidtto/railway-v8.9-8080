@@ -1,0 +1,23 @@
+name: Smoke Tests
+
+on:
+  push:
+    branches:
+      - main
+      - 'test/**'
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Python syntax
+        run: python -m py_compile scripts/generate.py scripts/health_proxy.py scripts/wait_port.py tests/subscription_smoke.py
+      - name: Shell syntax
+        run: sh -n scripts/start.sh
+      - name: Subscription smoke
+        run: python tests/subscription_smoke.py
