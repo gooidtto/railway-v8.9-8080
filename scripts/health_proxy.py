@@ -1,380 +1,203 @@
-import ipaddress
-import json
 import os
 import select
 import socket
 import threading
-import time
-import urllib.request
 from pathlib import Path
 from urllib.parse import urlsplit
 
 LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = int(os.getenv("PORT", "8080"))
-UPSTREAM_HOST = "127.0.0.1"
-UPSTREAM_PORT = int(os.getenv("XRAY_PORT", "10085"))
+REALITY_HOST = "127.0.0.1"
+REALITY_PORT = int(os.getenv("XRAY_PORT", "10085"))
+HTTP_XHTTP_HOST = "127.0.0.1"
+HTTP_XHTTP_PORT = int(os.getenv("XRAY_HTTP_PORT", "10086"))
 READY_FILE = os.getenv("XRAY_READY_FILE", "/data/.xray-ready")
 SITE_DIR = Path(os.getenv("SITE_DIR", "/opt/xray/site")).resolve()
 SUB_FILE = Path(os.getenv("SUBSCRIPTION_FILE", "/data/subscription.txt"))
 SUB_TOKEN_FILE = Path(os.getenv("SUBSCRIPTION_TOKEN_FILE", "/data/subscription_token.txt"))
 XHTTP_PATH = os.getenv("XHTTP_PATH", "/xhttp")
 
-GEO_CACHE = {}
-GEO_LOCK = threading.Lock()
-GEO_TTL = int(os.getenv("GEO_CACHE_TTL", "600"))
-GEO_TIMEOUT = float(os.getenv("GEO_TIMEOUT", "3"))
-INFO_RATE_LIMIT = {}
-INFO_RATE_LOCK = threading.Lock()
-INFO_RATE_WINDOW = float(os.getenv("INFO_RATE_WINDOW", "5"))
-
 
 def log(message):
     print(f"[tcp-proxy] {message}", flush=True)
 
 
-def valid_ip(value):
-    try:
-        ip = ipaddress.ip_address(value.strip())
-        if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_multicast:
-            return None
-        return ip
-    except ValueError:
-        return None
+def ready():
+    return Path(READY_FILE).exists()
 
 
-def client_ip_from_headers(headers, peer_ip):
-    for item in headers.get("x-forwarded-for", "").split(","):
-        ip = valid_ip(item)
-        if ip:
-            return str(ip)
-    xreal = valid_ip(headers.get("x-real-ip", ""))
-    return str(xreal) if xreal else str(peer_ip)
+def tune(sock):
+    for level, opt, value in ((socket.IPPROTO_TCP, socket.TCP_NODELAY, 1), (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)):
+        try:
+            sock.setsockopt(level, opt, value)
+        except OSError:
+            pass
 
 
-def geo_lookup(ip):
-    if not ip:
-        return {}
-    now = time.time()
-    with GEO_LOCK:
-        cached = GEO_CACHE.get(ip)
-        if cached and now - cached[0] < GEO_TTL:
-            return cached[1]
-    try:
-        req = urllib.request.Request(
-            f"https://ipapi.co/{ip}/json/",
-            headers={"User-Agent": "railway-xray-network-info/1.0", "Accept": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=GEO_TIMEOUT) as response:
-            data = json.loads(response.read().decode("utf-8", "replace"))
-        result = {
-            "country": data.get("country_name") or "",
-            "country_code": data.get("country_code") or "",
-            "region": data.get("region") or "",
-            "city": data.get("city") or "",
-            "org": data.get("org") or "",
-        }
-    except Exception:
-        result = {}
-    with GEO_LOCK:
-        GEO_CACHE[ip] = (now, result)
-    return result
-
-
-def resolver_ips():
-    result = []
-    try:
-        for line in Path("/etc/resolv.conf").read_text(encoding="utf-8", errors="replace").splitlines():
-            if line.strip().startswith("nameserver "):
-                ip = line.split()[1]
-                if ip not in result:
-                    result.append(ip)
-    except OSError:
-        pass
-    return result[:3]
-
-
-def country_flag(code):
-    code = (code or "").upper()
-    if len(code) != 2 or not code.isalpha():
-        return ""
-    return "".join(chr(127397 + ord(c)) for c in code)
-
-
-def network_info(headers, peer_ip):
-    ip = client_ip_from_headers(headers, peer_ip)
-    client_geo = geo_lookup(ip)
-    resolvers = []
-    for rip in resolver_ips():
-        g = geo_lookup(rip) if valid_ip(rip) else {}
-        resolvers.append({
-            "ip": rip,
-            "country": g.get("country", ""),
-            "country_code": g.get("country_code", ""),
-            "flag": country_flag(g.get("country_code", "")),
-        })
-    return {
-        "ip": ip,
-        "country": client_geo.get("country", ""),
-        "country_code": client_geo.get("country_code", ""),
-        "region": client_geo.get("region", ""),
-        "city": client_geo.get("city", ""),
-        "flag": country_flag(client_geo.get("country_code", "")),
-        "edge": headers.get("x-railway-edge", ""),
-        "deployment_region": os.getenv("RAILWAY_REPLICA_REGION", ""),
-        "dns_resolvers": resolvers,
-        "note": "DNS/route countries are estimates; browser DNS and BGP hops are not directly observable.",
-    }
-
-
-def http_response(status, content_type, body, head_only=False):
+def response(status, ctype, body, head=False):
     if isinstance(body, str):
-        body = body.encode("utf-8")
-    reason = {200: "OK", 404: "Not Found", 405: "Method Not Allowed", 429: "Too Many Requests", 503: "Service Unavailable"}.get(status, "OK")
-    head = (
-        f"HTTP/1.1 {status} {reason}\r\n"
-        f"Content-Type: {content_type}\r\n"
-        f"Content-Length: {len(body)}\r\n"
-        "Connection: close\r\n"
-        "Cache-Control: no-store\r\n"
-        "X-Content-Type-Options: nosniff\r\n"
-        "Referrer-Policy: no-referrer\r\n"
-        "Permissions-Policy: camera=(), microphone=(), geolocation=()\r\n"
-        "\r\n"
-    ).encode()
-    return head if head_only else head + body
+        body = body.encode()
+    reason = {200: "OK", 404: "Not Found", 405: "Method Not Allowed", 503: "Service Unavailable"}.get(status, "OK")
+    h = (f"HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {len(body)}\r\n"
+         "Connection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n").encode()
+    return h if head else h + body
 
 
-def parse_http_request(data):
+def parse_http(data):
     try:
         head = data.split(b"\r\n\r\n", 1)[0]
-        first = head.split(b"\r\n", 1)[0].decode("ascii", "strict")
+        first = head.split(b"\r\n", 1)[0].decode("ascii")
         parts = first.split(" ", 2)
         if len(parts) != 3 or not parts[2].startswith("HTTP/"):
             return None
         method, target, _ = parts
-        headers = {}
-        for line in head.split(b"\r\n")[1:]:
-            if b":" in line:
-                key, value = line.split(b":", 1)
-                try:
-                    headers[key.decode("ascii").strip().lower()] = value.decode("latin-1").strip()
-                except UnicodeDecodeError:
-                    pass
-        return method, urlsplit(target).path or "/", headers
+        return method, urlsplit(target).path or "/"
     except (UnicodeDecodeError, ValueError):
         return None
 
 
-def xray_ready():
-    return os.path.exists(READY_FILE)
+def is_tls(data):
+    return len(data) >= 3 and data[0] == 0x16 and data[1] == 0x03 and data[2] in (1, 2, 3, 4)
 
 
-def socket_tune(sock):
-    try:
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    except OSError:
-        pass
-    try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-    except OSError:
-        pass
-
-
-def relay(a, b, initial_a=b""):
-    """Bidirectional byte relay for long-lived XHTTP/REALITY connections."""
-    socket_tune(a)
-    socket_tune(b)
-    try:
-        a.settimeout(None)
-        b.settimeout(None)
-    except OSError:
-        pass
-    if initial_a:
-        b.sendall(initial_a)
-    bytes_a_to_b = len(initial_a)
-    bytes_b_to_a = 0
-    sockets = [a, b]
-    while True:
-        readable, _, exceptional = select.select(sockets, [], sockets, 300)
-        if exceptional or not readable:
-            return bytes_a_to_b, bytes_b_to_a
-        for src in readable:
-            dst = b if src is a else a
-            chunk = src.recv(65536)
-            if not chunk:
-                return bytes_a_to_b, bytes_b_to_a
-            dst.sendall(chunk)
-            if src is a:
-                bytes_a_to_b += len(chunk)
-            else:
-                bytes_b_to_a += len(chunk)
-
-
-def serve_static(client, path, head_only=False):
-    rel = "index.html" if path == "/" else path.lstrip("/")
-    target = (SITE_DIR / rel).resolve()
-    if SITE_DIR not in target.parents and target != SITE_DIR or not target.is_file():
-        client.sendall(http_response(404, "text/plain; charset=utf-8", "Not Found\n", head_only))
-        return
-    body = target.read_bytes()
-    types = {
-        ".html": "text/html; charset=utf-8",
-        ".js": "application/javascript; charset=utf-8",
-        ".css": "text/css; charset=utf-8",
-        ".json": "application/json; charset=utf-8",
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".svg": "image/svg+xml",
-        ".ico": "image/x-icon",
-    }
-    client.sendall(http_response(200, types.get(target.suffix.lower(), "application/octet-stream"), body, head_only))
-
-
-def subscription_token():
-    try:
-        return SUB_TOKEN_FILE.read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeError):
-        return ""
-
-
-def handle_subscription(client, method, path):
-    token = subscription_token()
-    if not token:
-        client.sendall(http_response(503, "text/plain; charset=utf-8", "Subscription not ready\n", method == "HEAD"))
-        return True
-    prefix = "/sub/"
-    if not path.startswith(prefix) or path != prefix + token:
-        client.sendall(http_response(404, "text/plain; charset=utf-8", "Not Found\n", method == "HEAD"))
-        return True
-    if not SUB_FILE.is_file():
-        client.sendall(http_response(503, "text/plain; charset=utf-8", "Subscription not ready\n", method == "HEAD"))
-        return True
-    client.sendall(http_response(200, "text/plain; charset=utf-8", SUB_FILE.read_bytes(), method == "HEAD"))
-    return True
-
-
-def handle_network_info(client, headers, peer_ip, head_only=False):
-    now = time.time()
-    key = peer_ip
-    with INFO_RATE_LOCK:
-        last = INFO_RATE_LIMIT.get(key, 0)
-        if now - last < INFO_RATE_WINDOW:
-            client.sendall(http_response(429, "application/json; charset=utf-8", '{"error":"rate_limited"}', head_only))
-            return
-        INFO_RATE_LIMIT[key] = now
-    body = json.dumps(network_info(headers, peer_ip), ensure_ascii=False, separators=(",", ":"))
-    client.sendall(http_response(200, "application/json; charset=utf-8", body, head_only))
-
-
-def handle_http(client, method, path, headers, peer_ip):
-    head_only = method == "HEAD"
-    if method not in {"GET", "HEAD"}:
-        client.sendall(http_response(405, "text/plain; charset=utf-8", "Method Not Allowed\n"))
-        return True
-    if path == "/api/network-info":
-        handle_network_info(client, headers, peer_ip, head_only)
-        return True
-    if path == "/health":
-        body = "OK\n" if xray_ready() else "NOT READY\n"
-        status = 200 if xray_ready() else 503
-        client.sendall(http_response(status, "text/plain; charset=utf-8", body, head_only))
-        return True
-    if path == "/sub" or path.startswith("/sub/"):
-        return handle_subscription(client, method, path)
-    if path == XHTTP_PATH or path.startswith(XHTTP_PATH + "/"):
-        return False
-    serve_static(client, path, head_only)
-    return True
-
-
-def is_tls_client_hello(data):
-    return len(data) >= 3 and data[0] == 0x16 and data[1] == 0x03 and data[2] in {0x01, 0x02, 0x03, 0x04}
-
-
-def recv_initial(client, max_bytes=16384, timeout=10.0):
-    """Read enough bytes to classify TLS passthrough or an ordinary HTTP request."""
-    client.settimeout(timeout)
+def recv_initial(sock, timeout=10):
+    sock.settimeout(timeout)
     data = bytearray()
-    while len(data) < max_bytes:
-        chunk = client.recv(min(4096, max_bytes - len(data)))
+    methods = (b"GET ", b"HEAD ", b"POST ", b"PUT ", b"DELETE ", b"OPTIONS ", b"PATCH ", b"CONNECT ")
+    while len(data) < 16384:
+        chunk = sock.recv(min(4096, 16384 - len(data)))
         if not chunk:
             break
         data.extend(chunk)
         raw = bytes(data)
-        if is_tls_client_hello(raw):
+        if is_tls(raw):
             return raw, "tls"
         if b"\r\n\r\n" in raw or b"\n\n" in raw:
             return raw, "http"
-        if len(raw) >= 3 and not raw.startswith((b"GET ", b"HEAD ", b"POST ", b"PUT ", b"DELETE ", b"OPTIONS ", b"PATCH ", b"CONNECT ")):
+        if len(raw) >= 3 and not raw.startswith(methods):
             return raw, "tcp"
-    return bytes(data), "http" if data else "empty"
+    return bytes(data), "empty" if not data else "http"
+
+
+def relay(a, b, initial=b""):
+    tune(a); tune(b)
+    a.settimeout(None); b.settimeout(None)
+    if initial:
+        b.sendall(initial)
+    c2s, s2c = len(initial), 0
+    while True:
+        readable, _, bad = select.select((a, b), (), (a, b), 300)
+        if bad or not readable:
+            return c2s, s2c
+        for src in readable:
+            dst = b if src is a else a
+            chunk = src.recv(65536)
+            if not chunk:
+                return c2s, s2c
+            dst.sendall(chunk)
+            if src is a:
+                c2s += len(chunk)
+            else:
+                s2c += len(chunk)
+
+
+def connect(host, port):
+    upstream = socket.create_connection((host, port), timeout=10)
+    tune(upstream)
+    return upstream
+
+
+def subscription_token():
+    try:
+        return SUB_TOKEN_FILE.read_text().strip()
+    except OSError:
+        return ""
+
+
+def handle_http(client, method, path):
+    if method not in {"GET", "HEAD"}:
+        client.sendall(response(405, "text/plain; charset=utf-8", "Method Not Allowed\n"))
+        return True
+    head = method == "HEAD"
+    if path == "/health":
+        ok = ready()
+        client.sendall(response(200 if ok else 503, "text/plain; charset=utf-8", "OK\n" if ok else "NOT READY\n", head))
+        return True
+    if path.startswith("/sub/"):
+        token = subscription_token()
+        if not token or path != "/sub/" + token or not SUB_FILE.is_file():
+            client.sendall(response(404, "text/plain; charset=utf-8", "Not Found\n", head))
+        else:
+            client.sendall(response(200, "text/plain; charset=utf-8", SUB_FILE.read_bytes(), head))
+        return True
+    if path == "/sub":
+        client.sendall(response(404, "text/plain; charset=utf-8", "Not Found\n", head))
+        return True
+    if path == XHTTP_PATH or path.startswith(XHTTP_PATH + "/"):
+        return False
+    rel = "index.html" if path == "/" else path.lstrip("/")
+    target = (SITE_DIR / rel).resolve()
+    if SITE_DIR not in target.parents and target != SITE_DIR or not target.is_file():
+        client.sendall(response(404, "text/plain; charset=utf-8", "Not Found\n", head))
+        return True
+    body = target.read_bytes()
+    types = {".html":"text/html; charset=utf-8", ".css":"text/css; charset=utf-8", ".js":"application/javascript; charset=utf-8", ".json":"application/json; charset=utf-8", ".svg":"image/svg+xml", ".png":"image/png", ".jpg":"image/jpeg", ".jpeg":"image/jpeg"}
+    client.sendall(response(200, types.get(target.suffix.lower(), "application/octet-stream"), body, head))
+    return True
 
 
 def handle(client):
-    upstream = None
     peer = "unknown"
+    upstream = None
     try:
-        peer = f"{client.getpeername()[0]}:{client.getpeername()[1]}"
+        p = client.getpeername()
+        peer = f"{p[0]}:{p[1]}"
     except OSError:
         pass
-    socket_tune(client)
-    log(f"ACCEPT peer={peer} listen={LISTEN_HOST}:{LISTEN_PORT} upstream={UPSTREAM_HOST}:{UPSTREAM_PORT} ready={xray_ready()}")
+    tune(client)
+    log(f"ACCEPT peer={peer} reality={REALITY_HOST}:{REALITY_PORT} http_xhttp={HTTP_XHTTP_HOST}:{HTTP_XHTTP_PORT} ready={ready()}")
     try:
         initial, kind = recv_initial(client)
-        if not initial or kind == "empty":
+        if not initial:
             log(f"CLOSE peer={peer} reason=no-initial-data")
             return
         log(f"CLASSIFY peer={peer} kind={kind} bytes={len(initial)} head={initial[:12].hex()}")
-
         if kind == "tls":
-            upstream = socket.create_connection((UPSTREAM_HOST, UPSTREAM_PORT), timeout=10)
-            socket_tune(upstream)
-            log(f"UPSTREAM_CONNECTED peer={peer} target={UPSTREAM_HOST}:{UPSTREAM_PORT} kind=tls")
+            upstream = connect(REALITY_HOST, REALITY_PORT)
+            log(f"UPSTREAM_CONNECTED peer={peer} target={REALITY_HOST}:{REALITY_PORT} kind=tls-reality")
             a2b, b2a = relay(client, upstream, initial)
-            log(f"RELAY_END peer={peer} kind=tls c2s={a2b} s2c={b2a}")
+            log(f"RELAY_END peer={peer} kind=tls-reality c2s={a2b} s2c={b2a}")
             return
-
-        parsed = parse_http_request(initial)
+        parsed = parse_http(initial)
         if parsed:
-            method, path, headers = parsed
+            method, path = parsed
             log(f"HTTP peer={peer} method={method} path={path}")
-            result = handle_http(client, method, path, headers, client.getpeername()[0])
-            if result is not False:
+            if handle_http(client, method, path):
                 log(f"HTTP_END peer={peer} path={path}")
                 return
             kind = "http-xhttp"
-
-        upstream = socket.create_connection((UPSTREAM_HOST, UPSTREAM_PORT), timeout=10)
-        socket_tune(upstream)
-        log(f"UPSTREAM_CONNECTED peer={peer} target={UPSTREAM_HOST}:{UPSTREAM_PORT} kind={kind}")
+        target = (HTTP_XHTTP_HOST, HTTP_XHTTP_PORT) if kind == "http-xhttp" else (REALITY_HOST, REALITY_PORT)
+        upstream = connect(*target)
+        log(f"UPSTREAM_CONNECTED peer={peer} target={target[0]}:{target[1]} kind={kind}")
         a2b, b2a = relay(client, upstream, initial)
         log(f"RELAY_END peer={peer} kind={kind} c2s={a2b} s2c={b2a}")
     except (OSError, TimeoutError) as exc:
         log(f"ERROR peer={peer} type={type(exc).__name__} detail={exc}")
     finally:
-        if upstream is not None:
-            try:
-                upstream.close()
-            except OSError:
-                pass
-        try:
-            client.close()
-        except OSError:
-            pass
+        if upstream:
+            try: upstream.close()
+            except OSError: pass
+        try: client.close()
+        except OSError: pass
         log(f"CLOSE peer={peer}")
 
 
 def main():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         server.bind((LISTEN_HOST, LISTEN_PORT))
         server.listen(256)
-        log(
-            f"LISTEN {LISTEN_HOST}:{LISTEN_PORT} xray={UPSTREAM_HOST}:{UPSTREAM_PORT} "
-            f"xhttp={XHTTP_PATH} railway_tcp_app_port={os.getenv('RAILWAY_TCP_APPLICATION_PORT', '') or 'unset'}"
-        )
+        log(f"LISTEN {LISTEN_HOST}:{LISTEN_PORT} reality={REALITY_HOST}:{REALITY_PORT} http_xhttp={HTTP_XHTTP_HOST}:{HTTP_XHTTP_PORT} xhttp={XHTTP_PATH}")
         while True:
             client, _ = server.accept()
             threading.Thread(target=handle, args=(client,), daemon=True).start()
