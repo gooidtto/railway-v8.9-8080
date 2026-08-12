@@ -60,10 +60,9 @@ xhttp_path = env("XHTTP_PATH", "/xhttp")
 xhttp_mode = env("XHTTP_MODE", "auto")
 short_id = env("SHORT_ID", "50175c035ee132")
 subscription_token = env("SUBSCRIPTION_TOKEN", "")
-host = env("SERVER_HOST", "")
-server_port = env("SERVER_PORT", "")
+host = env("SERVER_HOST", "").strip()
+server_port = env("SERVER_PORT", "").strip()
 public_domain = env("RAILWAY_PUBLIC_DOMAIN", "").strip()
-no_subscription = "--no-subscription" in os.sys.argv
 
 reality_inbound = {
     "listen": xray_listen,
@@ -77,8 +76,6 @@ reality_inbound = {
     },
 }
 
-# Railway terminates HTTPS on the public domain. The decrypted HTTP/XHTTP
-# request is routed to this internal plain-XHTTP VLESS inbound.
 https_inbound = {
     "listen": "127.0.0.1", "port": xray_http_port, "protocol": "vless",
     "settings": {"clients": [{"id": uuid}], "decryption": vless_decryption},
@@ -89,30 +86,28 @@ config = {"log": {"loglevel": env("XRAY_LOGLEVEL", "info")}, "inbounds": [realit
 config_path.parent.mkdir(parents=True, exist_ok=True)
 tmp = str(config_path) + ".tmp"
 with open(tmp, "w", encoding="utf-8") as f:
-    json.dump(config, f, indent=2); f.write("\n")
-os.chmod(tmp, 0o600); os.replace(tmp, config_path)
-data_dir.mkdir(parents=True, exist_ok=True); os.chmod(data_dir, 0o700)
+    json.dump(config, f, indent=2)
+    f.write("\n")
+os.chmod(tmp, 0o600)
+os.replace(tmp, config_path)
+data_dir.mkdir(parents=True, exist_ok=True)
+os.chmod(data_dir, 0o700)
 for filename, value in (("vless_decryption.txt", vless_decryption), ("vless_encryption.txt", vless_encryption)):
-    p = data_dir / filename; tmp = str(p) + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f: f.write(value + "\n")
-    os.chmod(tmp, 0o600); os.replace(tmp, p)
+    p = data_dir / filename
+    tmp = str(p) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(value + "\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, p)
 
-if not (host and server_port):
-    if no_subscription and public_domain:
-        host, server_port = public_domain, "443"
-    elif no_subscription:
-        for filename in ("subscription.txt", "vless.txt", "client.json", "subscription_url.txt"):
-            (data_dir / filename).unlink(missing_ok=True)
-        raise SystemExit(0)
-    else:
-        raise SystemExit("ERROR: SERVER_HOST/SERVER_PORT are required to generate the TCP subscription")
-
-reality_vless = (
-    f"vless://{uuid}@{host}:{server_port}/?encryption={quote(vless_encryption, safe='')}"
-    f"&security=reality&type=xhttp&fp={quote(fingerprint, safe='')}&sni={quote(sni, safe='')}"
-    f"&pbk={quote(public_key, safe='')}&sid={quote(short_id, safe='')}&path={quote(xhttp_path, safe='')}&mode={quote(xhttp_mode, safe='')}"
-    "#railway-xhttp-reality-mlkem768"
-)
+reality_vless = ""
+if host and server_port:
+    reality_vless = (
+        f"vless://{uuid}@{host}:{server_port}/?encryption={quote(vless_encryption, safe='')}"
+        f"&security=reality&type=xhttp&fp={quote(fingerprint, safe='')}&sni={quote(sni, safe='')}"
+        f"&pbk={quote(public_key, safe='')}&sid={quote(short_id, safe='')}&path={quote(xhttp_path, safe='')}&mode={quote(xhttp_mode, safe='')}"
+        "#railway-xhttp-reality-mlkem768"
+    )
 
 https_vless = ""
 if public_domain:
@@ -122,10 +117,9 @@ if public_domain:
         f"&path={quote(xhttp_path, safe='')}&mode={quote(xhttp_mode, safe='')}#railway-xhttp-https-mlkem768"
     )
 
-# Put the verified Railway HTTPS transport first. It does not depend on the
-# external TCP Proxy and is reachable through the same endpoint already proven
-# to return /sub and /health successfully.
-nodes = ([https_vless, reality_vless] if https_vless else [reality_vless])
+nodes = [n for n in (https_vless, reality_vless) if n]
+if not nodes:
+    raise SystemExit("ERROR: no usable public subscription endpoint; set RAILWAY_PUBLIC_DOMAIN or XRAY_TCP_PROXY_HOST/PORT")
 vless = "\n".join(nodes)
 (data_dir / "vless.txt").write_text(vless + "\n", encoding="utf-8")
 subscription = base64.b64encode((vless + "\n").encode()).decode() + "\n"
@@ -138,10 +132,11 @@ if subscription_token and public_domain:
 client_outbounds = []
 if https_vless:
     client_outbounds.append({"protocol":"vless","settings":{"vnext":[{"address":public_domain,"port":443,"users":[{"id":uuid,"encryption":vless_encryption}]}]},"streamSettings":{"network":"xhttp","security":"tls","tlsSettings":{"serverName":public_domain,"fingerprint":fingerprint,"alpn":["h2","http/1.1"]},"xhttpSettings":{"path":xhttp_path,"mode":xhttp_mode}}})
-client_outbounds.append({"protocol":"vless","settings":{"vnext":[{"address":host,"port":int(server_port),"users":[{"id":uuid,"encryption":vless_encryption}]}]},"streamSettings":{"network":"xhttp","security":"reality","realitySettings":{"serverName":sni,"fingerprint":fingerprint,"publicKey":public_key,"shortId":short_id},"xhttpSettings":{"path":xhttp_path,"mode":xhttp_mode}}})
+if reality_vless:
+    client_outbounds.append({"protocol":"vless","settings":{"vnext":[{"address":host,"port":int(server_port),"users":[{"id":uuid,"encryption":vless_encryption}]}]},"streamSettings":{"network":"xhttp","security":"reality","realitySettings":{"serverName":sni,"fingerprint":fingerprint,"publicKey":public_key,"shortId":short_id},"xhttpSettings":{"path":xhttp_path,"mode":xhttp_mode}}})
 client = {"log":{"loglevel":"warning"},"inbounds":[{"listen":"127.0.0.1","port":10808,"protocol":"socks","settings":{"udp":True}}],"outbounds":client_outbounds}
 with open(data_dir / "client.json", "w", encoding="utf-8") as f:
-    json.dump(client, f, indent=2); f.write("\n")
+    json.dump(client, f, indent=2)
 os.chmod(data_dir / "client.json", 0o600)
-summary = {"transports":["xhttp-https","xhttp-reality"],"security":["tls","reality"],"vless_encryption":"ML-KEM-768","xhttp_path":xhttp_path,"xhttp_mode":xhttp_mode,"sni":sni,"server_host":host,"server_port":int(server_port),"https_fallback_host":public_domain,"https_fallback_port":443 if public_domain else None,"xray_listen":xray_listen,"xray_port":xray_port,"xray_http_port":xray_http_port,"subscription_endpoint":"/sub/<token>"}
+summary = {"transports":["xhttp-https"] + (["xhttp-reality"] if reality_vless else []),"security":["tls"] + (["reality"] if reality_vless else []),"vless_encryption":"ML-KEM-768","xhttp_path":xhttp_path,"xhttp_mode":xhttp_mode,"sni":sni,"server_host":host or None,"server_port":int(server_port) if server_port else None,"https_fallback_host":public_domain or None,"https_fallback_port":443 if public_domain else None,"xray_listen":xray_listen,"xray_port":xray_port,"xray_http_port":xray_http_port,"subscription_endpoint":"/sub/<token>"}
 (data_dir / "server-summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
