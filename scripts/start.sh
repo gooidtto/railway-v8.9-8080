@@ -12,11 +12,15 @@ REALITY_FINGERPRINT="${REALITY_FINGERPRINT:-chrome}"
 XHTTP_PATH="${XHTTP_PATH:-/xhttp}"
 XHTTP_MODE="${XHTTP_MODE:-auto}"
 SHORT_ID="${SHORT_ID:-50175c035ee132}"
+RAILWAY_TCP_APPLICATION_PORT_VALUE="${RAILWAY_TCP_APPLICATION_PORT:-}"
+EXPLICIT_TCP_PROXY=0
+if [ -n "${SERVER_HOST:-}" ] || [ -n "${SERVER_PORT:-}" ] || [ -n "${TCP_PROXY_HOST:-}" ] || [ -n "${TCP_PROXY_PORT:-}" ]; then
+  EXPLICIT_TCP_PROXY=1
+fi
 # Explicit values take precedence. Railway's singular TCP proxy variables are
 # ambiguous when more than one TCP proxy exists on the same service.
 SERVER_HOST="${SERVER_HOST:-${TCP_PROXY_HOST:-}}"
 SERVER_PORT="${SERVER_PORT:-${TCP_PROXY_PORT:-}}"
-RAILWAY_TCP_APPLICATION_PORT_VALUE="${RAILWAY_TCP_APPLICATION_PORT:-}"
 if [ -z "$SERVER_HOST" ] && [ -z "$SERVER_PORT" ]; then
   SERVER_HOST="${RAILWAY_TCP_PROXY_DOMAIN:-}"
   SERVER_PORT="${RAILWAY_TCP_PROXY_PORT:-}"
@@ -36,10 +40,10 @@ if [ "$XRAY_PORT" = "$PORT" ]; then
   echo "ERROR: XRAY_PORT must differ from public PORT" >&2
   exit 1
 fi
-# A service may have multiple Railway TCP proxies, but Railway exposes only
-# one singular RAILWAY_TCP_PROXY_* pair to the process. Never silently publish
-# a subscription for a proxy targeting the HTTP port.
-if [ -n "$RAILWAY_TCP_APPLICATION_PORT_VALUE" ] && [ "$RAILWAY_TCP_APPLICATION_PORT_VALUE" != "$XRAY_PORT" ] && [ -z "${TCP_PROXY_HOST:-}" ] && [ -z "${TCP_PROXY_PORT:-}" ] && [ -z "${SERVER_HOST:-}" ] && [ -z "${SERVER_PORT:-}" ]; then
+# With multiple TCP proxies, Railway's singular RAILWAY_TCP_PROXY_* variables
+# can refer to the wrong proxy. Never publish a subscription for a proxy whose
+# reported target is the HTTP port unless the operator explicitly overrides it.
+if [ "$EXPLICIT_TCP_PROXY" -eq 0 ] && [ -n "$RAILWAY_TCP_APPLICATION_PORT_VALUE" ] && [ "$RAILWAY_TCP_APPLICATION_PORT_VALUE" != "$XRAY_PORT" ]; then
   echo "ERROR: Railway TCP proxy target is ${RAILWAY_TCP_APPLICATION_PORT_VALUE}, but Xray listens on ${XRAY_PORT}. Remove the stale TCP proxy or set TCP_PROXY_HOST/TCP_PROXY_PORT to the proxy targeting ${XRAY_PORT}." >&2
   exit 1
 fi
@@ -135,7 +139,6 @@ trap cleanup INT TERM EXIT
 
 echo "TCP subscription endpoint: ${SERVER_HOST}:${SERVER_PORT}" >&2
 echo "Railway TCP application port reported: ${RAILWAY_TCP_APPLICATION_PORT_VALUE:-unset}; Xray port: ${XRAY_PORT}" >&2
-
 echo "VLESS Encryption: ML-KEM-768 (Post-Quantum) enabled" >&2
 echo "REALITY target: $REALITY_TARGET" >&2
 python3 /opt/xray/scripts/generate.py
