@@ -61,8 +61,14 @@ xhttp_mode = env("XHTTP_MODE", "auto")
 short_id = env("SHORT_ID", "50175c035ee132")
 subscription_token = env("SUBSCRIPTION_TOKEN", "")
 
-# A dedicated Railway TCP Proxy is the authoritative public endpoint for
-# REALITY. Do not silently fall back to a TCP proxy targeting the HTTP port.
+# Endpoint precedence:
+# 1. Explicit XRAY_TCP_PROXY_HOST/PORT (authoritative).
+# 2. Explicit SERVER_HOST/SERVER_PORT (compatibility override).
+# 3. Railway's injected RAILWAY_TCP_PROXY_DOMAIN/PORT, but only when the
+#    target application port is known to be Xray 10085, or when Railway did
+#    not expose the target-port metadata at all. This fixes deployments where
+#    Railway exposes the public TCP proxy but leaves RAILWAY_TCP_APPLICATION_PORT
+#    unset. A known target of 8080 is always rejected for REALITY.
 dedicated_host = env("XRAY_TCP_PROXY_HOST", "").strip()
 dedicated_port = env("XRAY_TCP_PROXY_PORT", "").strip()
 if bool(dedicated_host) != bool(dedicated_port):
@@ -70,8 +76,36 @@ if bool(dedicated_host) != bool(dedicated_port):
 if dedicated_port and (not dedicated_port.isdigit() or not 1 <= int(dedicated_port) <= 65535):
     raise SystemExit("ERROR: XRAY_TCP_PROXY_PORT must be 1-65535")
 
-host = dedicated_host or env("SERVER_HOST", "").strip()
-server_port = dedicated_port or env("SERVER_PORT", "").strip()
+explicit_host = dedicated_host or env("SERVER_HOST", "").strip()
+explicit_port = dedicated_port or env("SERVER_PORT", "").strip()
+railway_host = env("RAILWAY_TCP_PROXY_DOMAIN", "").strip()
+railway_port = env("RAILWAY_TCP_PROXY_PORT", "").strip()
+railway_target_port = env("RAILWAY_TCP_APPLICATION_PORT", "").strip()
+
+host = explicit_host
+server_port = explicit_port
+endpoint_source = "explicit" if host and server_port else "disabled"
+
+if not (host and server_port) and bool(railway_host) != bool(railway_port):
+    raise SystemExit("ERROR: Railway TCP proxy metadata is incomplete: RAILWAY_TCP_PROXY_DOMAIN/PORT must be set together")
+
+if not (host and server_port) and railway_host and railway_port:
+    if not railway_port.isdigit() or not 1 <= int(railway_port) <= 65535:
+        raise SystemExit("ERROR: RAILWAY_TCP_PROXY_PORT must be 1-65535")
+    if railway_target_port == str(xray_port):
+        host, server_port, endpoint_source = railway_host, railway_port, "railway-xray-port"
+    elif railway_target_port == str(env("PORT", "8080")):
+        # A Railway proxy known to target HTTP 8080 is never a REALITY endpoint.
+        host, server_port, endpoint_source = "", "", "rejected-http-port"
+    elif not railway_target_port:
+        # Railway sometimes exposes DOMAIN/PORT but omits APPLICATION_PORT.
+        # In the single-service configuration the only acceptable public TCP
+        # target is Xray's 10085; use the metadata rather than silently dropping
+        # the node from the subscription.
+        host, server_port, endpoint_source = railway_host, railway_port, "railway-port-metadata"
+    else:
+        host, server_port, endpoint_source = "", "", "rejected-unknown-port"
+
 public_domain = env("RAILWAY_PUBLIC_DOMAIN", "").strip()
 
 reality_inbound = {
@@ -148,5 +182,5 @@ client = {"log":{"loglevel":"warning"},"inbounds":[{"listen":"127.0.0.1","port":
 with open(data_dir / "client.json", "w", encoding="utf-8") as f:
     json.dump(client, f, indent=2)
 os.chmod(data_dir / "client.json", 0o600)
-summary = {"transports":["xhttp-https"] + (["xhttp-reality"] if reality_vless else []),"security":["tls"] + (["reality"] if reality_vless else []),"vless_encryption":"ML-KEM-768","xhttp_path":xhttp_path,"xhttp_mode":xhttp_mode,"sni":sni,"server_host":host or None,"server_port":int(server_port) if server_port else None,"https_fallback_host":public_domain or None,"https_fallback_port":443 if public_domain else None,"xray_listen":xray_listen,"xray_port":xray_port,"xray_http_port":xray_http_port,"subscription_endpoint":"/sub/<token>"}
+summary = {"transports":["xhttp-https"] + (["xhttp-reality"] if reality_vless else []),"security":["tls"] + (["reality"] if reality_vless else []),"vless_encryption":"ML-KEM-768","xhttp_path":xhttp_path,"xhttp_mode":xhttp_mode,"sni":sni,"server_host":host or None,"server_port":int(server_port) if server_port else None,"endpoint_source":endpoint_source,"https_fallback_host":public_domain or None,"https_fallback_port":443 if public_domain else None,"xray_listen":xray_listen,"xray_port":xray_port,"xray_http_port":xray_http_port,"subscription_endpoint":"/sub/<token>"}
 (data_dir / "server-summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
