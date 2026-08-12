@@ -16,24 +16,34 @@ RAILWAY_TCP_APPLICATION_PORT_VALUE="${RAILWAY_TCP_APPLICATION_PORT:-}"
 
 # Endpoint selection:
 # 1. Explicit SERVER/TCP override wins.
-# 2. Railway's advertised TCP proxy is preferred even when it targets PORT=8080,
-#    because the local health_proxy multiplexes HTTP and raw TLS to Xray:10085.
-# 3. XRAY_TCP_PROXY_* is the explicit fallback for a dedicated 10085 proxy.
+# 2. A dedicated XRAY_TCP_PROXY_* endpoint is preferred for REALITY because
+#    it must terminate raw TLS directly at Xray:${XRAY_PORT}.
+# 3. Railway's generic TCP proxy is only used as a legacy fallback when its
+#    application port is the Xray port. A proxy targeting PORT=8080 is HTTP
+#    multiplexing and must not be advertised as a REALITY endpoint.
 SERVER_HOST="${SERVER_HOST:-${TCP_PROXY_HOST:-}}"
 SERVER_PORT="${SERVER_PORT:-${TCP_PROXY_PORT:-}}"
-if [ -z "$SERVER_HOST" ] && [ -z "$SERVER_PORT" ]; then
-  if [ -n "${RAILWAY_TCP_PROXY_DOMAIN:-}" ] && [ -n "${RAILWAY_TCP_PROXY_PORT:-}" ]; then
+
+if [ -n "${XRAY_TCP_PROXY_HOST:-}" ] || [ -n "${XRAY_TCP_PROXY_PORT:-}" ]; then
+  if [ -z "${XRAY_TCP_PROXY_HOST:-}" ] || [ -z "${XRAY_TCP_PROXY_PORT:-}" ]; then
+    echo "ERROR: XRAY_TCP_PROXY_HOST and XRAY_TCP_PROXY_PORT must be set together" >&2
+    exit 1
+  fi
+  SERVER_HOST="$XRAY_TCP_PROXY_HOST"
+  SERVER_PORT="$XRAY_TCP_PROXY_PORT"
+  echo "Using dedicated Xray TCP proxy ${SERVER_HOST}:${SERVER_PORT} -> internal ${XRAY_PORT}." >&2
+elif [ -z "$SERVER_HOST" ] && [ -z "$SERVER_PORT" ]; then
+  if [ -n "${RAILWAY_TCP_PROXY_DOMAIN:-}" ] && [ -n "${RAILWAY_TCP_PROXY_PORT:-}" ] && [ "${RAILWAY_TCP_APPLICATION_PORT_VALUE:-}" = "$XRAY_PORT" ]; then
     SERVER_HOST="$RAILWAY_TCP_PROXY_DOMAIN"
     SERVER_PORT="$RAILWAY_TCP_PROXY_PORT"
-    echo "Using Railway TCP proxy ${SERVER_HOST}:${SERVER_PORT} -> internal ${RAILWAY_TCP_APPLICATION_PORT_VALUE:-unknown}; local proxy forwards raw TLS to Xray:${XRAY_PORT}." >&2
+    echo "Using Railway TCP proxy ${SERVER_HOST}:${SERVER_PORT} -> internal ${XRAY_PORT}." >&2
+  elif [ -n "${RAILWAY_TCP_PROXY_DOMAIN:-}" ] && [ -n "${RAILWAY_TCP_PROXY_PORT:-}" ]; then
+    echo "WARNING: Railway TCP proxy ${RAILWAY_TCP_PROXY_DOMAIN}:${RAILWAY_TCP_PROXY_PORT} targets application port ${RAILWAY_TCP_APPLICATION_PORT_VALUE:-unknown}, not Xray ${XRAY_PORT}; it will not be used for REALITY." >&2
+    SERVER_HOST=""
+    SERVER_PORT=""
   else
     SERVER_HOST="${XRAY_TCP_PROXY_HOST:-}"
     SERVER_PORT="${XRAY_TCP_PROXY_PORT:-}"
-    if [ -z "$SERVER_HOST" ] || [ -z "$SERVER_PORT" ]; then
-      echo "ERROR: no TCP proxy endpoint is available for subscription generation" >&2
-      exit 1
-    fi
-    echo "Using explicit Xray TCP proxy ${SERVER_HOST}:${SERVER_PORT}." >&2
   fi
 fi
 
@@ -136,11 +146,11 @@ cleanup(){
 }
 trap cleanup INT TERM EXIT
 
-echo "TCP subscription endpoint: ${SERVER_HOST}:${SERVER_PORT}" >&2
+echo "TCP subscription endpoint: ${SERVER_HOST:-disabled}" >&2
 echo "Railway TCP application port reported: ${RAILWAY_TCP_APPLICATION_PORT_VALUE:-unset}; Xray port: ${XRAY_PORT}" >&2
 echo "VLESS Encryption: ML-KEM-768 (Post-Quantum) enabled" >&2
 echo "REALITY target: $REALITY_TARGET" >&2
-python3 /opt/xray/scripts/generate.py
+python3 /opt/xray/scripts/generate.py --no-subscription
 
 xray run -test -config "$CONFIG"
 echo "Starting Xray on ${XRAY_LISTEN}:$XRAY_PORT; public HTTP listener is 0.0.0.0:$PORT" >&2
