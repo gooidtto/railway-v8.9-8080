@@ -165,7 +165,15 @@ def xray_ready():
     return os.path.exists(READY_FILE)
 
 
-def relay(a, b):
+def relay(a, b, initial_a=b""):
+    """Bidirectional byte relay for long-lived XHTTP/TLS connections."""
+    try:
+        a.settimeout(None)
+        b.settimeout(None)
+    except OSError:
+        pass
+    if initial_a:
+        b.sendall(initial_a)
     sockets = [a, b]
     while True:
         readable, _, exceptional = select.select(sockets, [], sockets, 300)
@@ -257,42 +265,59 @@ def handle_http(client, method, path, headers, peer_ip):
     return True
 
 
-def peek_http_header(client, max_bytes=16384, timeout=5.0):
-    deadline = time.monotonic() + timeout
-    while True:
-        remaining = max(0.05, deadline - time.monotonic())
-        client.settimeout(remaining)
-        try:
-            buffered = client.recv(max_bytes, socket.MSG_PEEK)
-        except socket.timeout:
-            return b""
-        if not buffered:
-            return b""
-        # Important: these are actual CRLF bytes, not the literal characters
-        # backslash-r/backslash-n. A previous build used the latter and could
-        # wait until timeout on every ordinary HTTP/XHTTP request.
-        if b"\r\n\r\n" in buffered or b"\n\n" in buffered:
-            return buffered
-        if len(buffered) >= max_bytes:
-            return buffered
-        time.sleep(0.005)
+def is_tls_client_hello(data):
+    """REALITY/XHTTP arrives as a TLS ClientHello over Railway TCP Proxy."""
+    return len(data) >= 3 and data[0] == 0x16 and data[1] == 0x03 and data[2] in {0x01, 0x02, 0x03, 0x04}
+
+
+def recv_initial(client, max_bytes=16384, timeout=10.0):
+    """Read enough bytes to classify TLS passthrough or an ordinary HTTP request."""
+    client.settimeout(timeout)
+    data = bytearray()
+    while len(data) < max_bytes:
+        chunk = client.recv(min(4096, max_bytes - len(data)))
+        if not chunk:
+            break
+        data.extend(chunk)
+        raw = bytes(data)
+        if is_tls_client_hello(raw):
+            return raw, "tls"
+        if b"\r\n\r\n" in raw or b"\n\n" in raw:
+            return raw, "http"
+        if len(raw) >= 3 and not raw.startswith((b"GET ", b"HEAD ", b"POST ", b"PUT ", b"DELETE ", b"OPTIONS ", b"PATCH ", b"CONNECT ")):
+            return raw, "tcp"
+    return bytes(data), "http" if data else "empty"
 
 
 def handle(client):
-    client.settimeout(5)
     upstream = None
     try:
-        buffered = peek_http_header(client)
-        if not buffered:
+        initial, kind = recv_initial(client)
+        if not initial or kind == "empty":
             return
-        parsed = parse_http_request(buffered)
+
+        # A REALITY connection is TLS from byte zero. Do not try to parse it as
+        # HTTP and do not wait for an HTTP delimiter: that path caused XHTTP
+        # clients to time out behind the Railway TCP proxy.
+        if kind == "tls":
+            upstream = socket.create_connection((UPSTREAM_HOST, UPSTREAM_PORT), timeout=10)
+            relay(client, upstream, initial)
+            return
+
+        parsed = parse_http_request(initial)
         if parsed:
             method, path, headers = parsed
             result = handle_http(client, method, path, headers, client.getpeername()[0])
             if result is not False:
                 return
-        upstream = socket.create_connection((UPSTREAM_HOST, UPSTREAM_PORT), timeout=5)
-        relay(client, upstream)
+            upstream = socket.create_connection((UPSTREAM_HOST, UPSTREAM_PORT), timeout=10)
+            relay(client, upstream, initial)
+            return
+
+        # Unknown/plain TCP is forwarded conservatively to Xray. This keeps the
+        # public listener transparent for future XHTTP transport changes.
+        upstream = socket.create_connection((UPSTREAM_HOST, UPSTREAM_PORT), timeout=10)
+        relay(client, upstream, initial)
     except (OSError, TimeoutError):
         pass
     finally:
@@ -307,6 +332,7 @@ def handle(client):
 def main():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         server.bind((LISTEN_HOST, LISTEN_PORT))
         server.listen(256)
         print(f"public listener {LISTEN_HOST}:{LISTEN_PORT}; site=/; health=/health; sub=/sub; xhttp={XHTTP_PATH}; xray={UPSTREAM_HOST}:{UPSTREAM_PORT}", flush=True)
