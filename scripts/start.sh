@@ -1,4 +1,4 @@
-# /bin/sh
+#!/bin/sh
 set -eu
 
 DATA_DIR="${RAILWAY_VOLUME_MOUNT_PATH:-${DATA_DIR:-/data}}"
