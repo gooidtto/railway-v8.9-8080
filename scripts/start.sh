@@ -1,9 +1,10 @@
-#!/bin/sh
+# /bin/sh
 set -eu
 
 DATA_DIR="${RAILWAY_VOLUME_MOUNT_PATH:-${DATA_DIR:-/data}}"
 PORT="${PORT:-8080}"
 XRAY_PORT="${XRAY_PORT:-10085}"
+XRAY_LISTEN="${XRAY_LISTEN:-0.0.0.0}"
 CONFIG="${XRAY_CONFIG:-/etc/xray/config.json}"
 REALITY_TARGET="${REALITY_TARGET:-www.cloudflare.com:443}"
 REALITY_SNI="${REALITY_SNI:-${REALITY_TARGET%%:*}}"
@@ -102,7 +103,7 @@ fi
 case "$SUBSCRIPTION_TOKEN" in *[!A-Za-z0-9_-]*|'') echo "ERROR: invalid subscription token" >&2; exit 1;; esac
 chmod 0600 "$SUB_TOKEN_FILE"
 
-export DATA_DIR PORT XRAY_PORT CONFIG REALITY_TARGET REALITY_SNI REALITY_FINGERPRINT XHTTP_PATH XHTTP_MODE SHORT_ID UUID PRIVATE_KEY PUBLIC_KEY VLESS_DECRYPTION VLESS_ENCRYPTION SERVER_HOST SERVER_PORT SUBSCRIPTION_TOKEN XRAY_READY_FILE="$READY_FILE"
+export DATA_DIR PORT XRAY_PORT XRAY_LISTEN CONFIG REALITY_TARGET REALITY_SNI REALITY_FINGERPRINT XHTTP_PATH XHTTP_MODE SHORT_ID UUID PRIVATE_KEY PUBLIC_KEY VLESS_DECRYPTION VLESS_ENCRYPTION SERVER_HOST SERVER_PORT SUBSCRIPTION_TOKEN XRAY_READY_FILE="$READY_FILE"
 
 python3 /opt/xray/scripts/health_proxy.py & HEALTH_PID=$!
 cleanup(){
@@ -124,7 +125,7 @@ else
 fi
 
 xray run -test -config "$CONFIG"
-echo "Starting Xray on 127.0.0.1:$XRAY_PORT; public listener is 0.0.0.0:$PORT" >&2
+echo "Starting Xray on ${XRAY_LISTEN}:$XRAY_PORT; public HTTP listener is 0.0.0.0:$PORT" >&2
 xray run -config "$CONFIG" & XRAY_PID=$!
 READY=0
 for _ in $(seq 1 60); do
@@ -152,5 +153,5 @@ if [ -n "$SERVER_HOST" ] && [ -n "$SERVER_PORT" ]; then
   echo "TCP Proxy configured: ${SERVER_HOST}:${SERVER_PORT}" >&2
 fi
 echo "Website: ${PUBLIC_DOMAIN:+https://$PUBLIC_DOMAIN/}" >&2
-echo "Xray ready; health/tcp port=$PORT; xray port=$XRAY_PORT" >&2
+echo "Xray ready; HTTP port=$PORT; Xray TCP port=$XRAY_PORT listen=$XRAY_LISTEN" >&2
 wait "$XRAY_PID"
