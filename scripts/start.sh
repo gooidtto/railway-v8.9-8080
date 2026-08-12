@@ -2,10 +2,11 @@
 set -eu
 
 DATA_DIR="${RAILWAY_VOLUME_MOUNT_PATH:-${DATA_DIR:-/data}}"
-# Railway exposes the service on PORT. With the TCP Proxy configured to the
-# same application port, one local TCP multiplexer must own PORT and dispatch
-# HTTP to the web/subscription handler and TLS/REALITY to Xray.
-GATEWAY_PORT="${PORT:-${PUBLIC_HTTP_PORT:-8080}}"
+# Railway exposes the HTTP service on 8080 and the TCP Proxy on the service
+# PORT (currently 10085). Keep both public entry points alive: 8080 serves the
+# Railway HTTP edge, while 10085 is the raw TCP gateway for the TCP Proxy.
+GATEWAY_PORT="${PORT:-10085}"
+PUBLIC_HTTP_PORT="${PUBLIC_HTTP_PORT:-8080}"
 PORT="$GATEWAY_PORT"
 XRAY_PORT="${XRAY_PORT:-10087}"
 XRAY_HTTP_PORT="${XRAY_HTTP_PORT:-10086}"
@@ -22,8 +23,6 @@ RAILWAY_TCP_APPLICATION_PORT_VALUE="${RAILWAY_TCP_APPLICATION_PORT:-}"
 SERVER_HOST="${SERVER_HOST:-${TCP_PROXY_HOST:-}}"
 SERVER_PORT="${SERVER_PORT:-${TCP_PROXY_PORT:-}}"
 
-# The public Railway TCP proxy must point to the gateway port (PORT), not the
-# private Xray port. The gateway then forwards REALITY TLS to XRAY_PORT.
 if [ -n "${XRAY_TCP_PROXY_HOST:-}" ] || [ -n "${XRAY_TCP_PROXY_PORT:-}" ]; then
   [ -n "${XRAY_TCP_PROXY_HOST:-}" ] && [ -n "${XRAY_TCP_PROXY_PORT:-}" ] || { echo "ERROR: XRAY_TCP_PROXY_HOST and XRAY_TCP_PROXY_PORT must be set together" >&2; exit 1; }
   SERVER_HOST="$XRAY_TCP_PROXY_HOST"
@@ -96,10 +95,7 @@ fi
 case "$SUBSCRIPTION_TOKEN" in *[!A-Za-z0-9_-]*|'') echo "ERROR: invalid subscription token" >&2; exit 1;; esac
 chmod 0600 "$SUB_TOKEN_FILE"
 
-# generate.py uses SERVER_HOST/SERVER_PORT as the public TCP endpoint, while
-# XRAY_PORT is now private. This allows Railway TCP :50192 -> application PORT
-# and the same application PORT to serve the public HTTPS/subscription path.
-export PORT PUBLIC_HTTP_PORT="$GATEWAY_PORT" GATEWAY_PORT DATA_DIR XRAY_PORT XRAY_HTTP_PORT XRAY_LISTEN CONFIG REALITY_TARGET REALITY_SNI REALITY_FINGERPRINT XHTTP_PATH XHTTP_MODE SHORT_ID UUID PRIVATE_KEY PUBLIC_KEY VLESS_DECRYPTION VLESS_ENCRYPTION SERVER_HOST SERVER_PORT SUBSCRIPTION_TOKEN TCP_PROXY_PROTOCOL XRAY_READY_FILE="$READY_FILE"
+export PORT GATEWAY_PORT PUBLIC_HTTP_PORT DATA_DIR XRAY_PORT XRAY_HTTP_PORT XRAY_LISTEN CONFIG REALITY_TARGET REALITY_SNI REALITY_FINGERPRINT XHTTP_PATH XHTTP_MODE SHORT_ID UUID PRIVATE_KEY PUBLIC_KEY VLESS_DECRYPTION VLESS_ENCRYPTION SERVER_HOST SERVER_PORT SUBSCRIPTION_TOKEN TCP_PROXY_PROTOCOL XRAY_READY_FILE="$READY_FILE"
 
 python3 /opt/xray/scripts/health_proxy.py & HEALTH_PID=$!
 cleanup(){
@@ -111,13 +107,13 @@ cleanup(){
 }
 trap cleanup INT TERM EXIT
 
-echo "Railway PORT/gateway: $GATEWAY_PORT; private Xray REALITY: $XRAY_PORT; XHTTP: $XRAY_HTTP_PORT" >&2
+echo "Railway HTTP port: $PUBLIC_HTTP_PORT; TCP gateway: $GATEWAY_PORT; private Xray REALITY: $XRAY_PORT; XHTTP: $XRAY_HTTP_PORT" >&2
 echo "TCP subscription endpoint: ${SERVER_HOST:-disabled}:${SERVER_PORT:-}" >&2
 echo "Railway TCP application port: ${RAILWAY_TCP_APPLICATION_PORT_VALUE:-unset}" >&2
 python3 /opt/xray/scripts/generate.py --no-subscription
 
 xray run -test -config "$CONFIG"
-echo "Starting Xray on ${XRAY_LISTEN}:$XRAY_PORT; gateway listens on 0.0.0.0:$GATEWAY_PORT" >&2
+echo "Starting Xray on ${XRAY_LISTEN}:$XRAY_PORT; HTTP gateway=0.0.0.0:$PUBLIC_HTTP_PORT; TCP gateway=0.0.0.0:$GATEWAY_PORT" >&2
 xray run -config "$CONFIG" & XRAY_PID=$!
 READY=0
 for _ in $(seq 1 60); do
@@ -134,5 +130,5 @@ if [ -n "$PUBLIC_DOMAIN" ]; then
   chmod 0600 "$DATA_DIR/subscription_url.txt"
 fi
 echo "Website: ${PUBLIC_DOMAIN:+https://$PUBLIC_DOMAIN/}" >&2
-echo "Xray ready; gateway=$GATEWAY_PORT reality=$XRAY_PORT xhttp=$XRAY_HTTP_PORT" >&2
+echo "Xray ready; http=$PUBLIC_HTTP_PORT gateway=$GATEWAY_PORT reality=$XRAY_PORT xhttp=$XRAY_HTTP_PORT" >&2
 wait "$XRAY_PID"
