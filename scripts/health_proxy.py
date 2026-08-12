@@ -8,7 +8,9 @@ from urllib.parse import urlsplit
 HTTP_LISTEN_HOST = "0.0.0.0"
 HTTP_LISTEN_PORT = int(os.getenv("PUBLIC_HTTP_PORT", "8080"))
 GATEWAY_LISTEN_HOST = "0.0.0.0"
-GATEWAY_LISTEN_PORT = int(os.getenv("GATEWAY_PORT", os.getenv("PORT", "10085")))
+# 8080 is the stable Railway unified ingress. Keep the standalone default
+# aligned with start.sh so a missing PORT cannot silently resurrect 10085.
+GATEWAY_LISTEN_PORT = int(os.getenv("GATEWAY_PORT", os.getenv("PORT", "8080")))
 REALITY_HOST = "127.0.0.1"
 REALITY_PORT = int(os.getenv("XRAY_PORT", "10087"))
 HTTP_XHTTP_HOST = "127.0.0.1"
@@ -90,11 +92,25 @@ def _proxy_header_length(data):
     return 0
 
 
+def _strip_proxy_header(data):
+    """Return (payload, pending) for optional HAProxy PROXY headers.
+
+    Railway may place a PROXY v1/v2 header in front of the application bytes.
+    The classifier must never feed that metadata into Xray, but it also must
+    wait for the remainder of a fragmented header before classifying TLS/HTTP.
+    """
+    header_len = _proxy_header_length(data)
+    if header_len is None:
+        return data, True
+    if header_len:
+        return data[header_len:], False
+    return data, False
+
+
 def recv_initial(s, timeout=10):
     s.settimeout(timeout)
     data = bytearray()
     methods = (b"GET ", b"HEAD ", b"POST ", b"PUT ", b"DELETE ", b"OPTIONS ", b"PATCH ", b"CONNECT ")
-    proxy_pending = False
     proxy_header_seen = False
 
     while len(data) < 16384:
@@ -105,17 +121,11 @@ def recv_initial(s, timeout=10):
         raw = bytes(data)
 
         if not proxy_header_seen:
-            header_len = _proxy_header_length(raw)
-            if header_len is None:
-                proxy_pending = True
+            raw, pending = _strip_proxy_header(raw)
+            if pending:
                 continue
-            if header_len:
-                proxy_header_seen = True
-                proxy_pending = False
-                raw = raw[header_len:]
-                data = bytearray(raw)
-            else:
-                proxy_header_seen = True
+            proxy_header_seen = True
+            data = bytearray(raw)
 
         if not raw:
             continue
@@ -127,6 +137,8 @@ def recv_initial(s, timeout=10):
             return raw, "tcp"
 
     raw = bytes(data)
+    if not proxy_header_seen:
+        raw, _ = _strip_proxy_header(raw)
     if not raw:
         return b"", "empty"
     if is_tls(raw):
