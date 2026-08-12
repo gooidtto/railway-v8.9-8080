@@ -16,17 +16,25 @@ RAILWAY_TCP_APPLICATION_PORT_VALUE="${RAILWAY_TCP_APPLICATION_PORT:-}"
 
 # Endpoint selection:
 # 1. Explicit SERVER/TCP override wins.
-# 2. A dedicated XRAY_TCP_PROXY_* endpoint is preferred for REALITY because
-#    it must terminate raw TLS directly at Xray:${XRAY_PORT}.
-# 3. Railway's generic TCP proxy is only used as a legacy fallback when its
-#    application port is the Xray port. A proxy targeting PORT=8080 is HTTP
-#    multiplexing and must not be advertised as a REALITY endpoint.
+# 2. A dedicated XRAY_TCP_PROXY_* endpoint is authoritative for REALITY.
+# 3. Railway's generic TCP proxy is used only when its application port is
+#    exactly the Xray port. A proxy targeting PORT=8080 must never be
+#    advertised as a REALITY endpoint.
 SERVER_HOST="${SERVER_HOST:-${TCP_PROXY_HOST:-}}"
 SERVER_PORT="${SERVER_PORT:-${TCP_PROXY_PORT:-}}"
 
 if [ -n "${XRAY_TCP_PROXY_HOST:-}" ] || [ -n "${XRAY_TCP_PROXY_PORT:-}" ]; then
   if [ -z "${XRAY_TCP_PROXY_HOST:-}" ] || [ -z "${XRAY_TCP_PROXY_PORT:-}" ]; then
     echo "ERROR: XRAY_TCP_PROXY_HOST and XRAY_TCP_PROXY_PORT must be set together" >&2
+    exit 1
+  fi
+  case "$XRAY_TCP_PROXY_PORT" in ''|*[!0-9]*) echo "ERROR: XRAY_TCP_PROXY_PORT must be numeric" >&2; exit 1;; esac
+  if [ "$XRAY_TCP_PROXY_PORT" -ne "$XRAY_PORT" ]; then
+    echo "ERROR: dedicated TCP proxy target must be Xray port $XRAY_PORT; got $XRAY_TCP_PROXY_PORT" >&2
+    exit 1
+  fi
+  if [ "$XRAY_TCP_PROXY_PORT" -eq "$PORT" ]; then
+    echo "ERROR: dedicated TCP proxy cannot target public HTTP port $PORT" >&2
     exit 1
   fi
   SERVER_HOST="$XRAY_TCP_PROXY_HOST"
