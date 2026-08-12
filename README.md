@@ -1,52 +1,70 @@
 # Railway Xray v8.9-R — Dual Protocol + Single-Service 8080
 
-本仓库保留原有的 **三服务双协议架构**，同时新增经过修复的 **Root 单服务 XHTTP/REALITY 8080 部署模式**。
+本仓库保留原有的 **三服务双协议架构**，同时提供经过修复的 **Root 单服务 XHTTP/REALITY 模式**。
 
-## 推荐：Root 单服务 8080 模式
+## 推荐：Root 单服务模式
 
-如果目标是先把 Railway 上的 **网站 + `/health` + 订阅 + XHTTP/REALITY + TCP Proxy** 稳定跑通，直接把本仓库根目录作为 Railway Service 的 Root Directory 即可。
+目标是把 Railway 上的 **网站 + `/health` + 订阅 + XHTTP/REALITY + TCP Proxy** 分成两个明确的内部端口：
 
-根目录模式包含：
+- `8080`：HTTP Domain → 网站、`/health`、`/sub/<token>`
+- `10085`：TCP Proxy → Xray 原始 TCP/TLS/XHTTP 流量
 
-- `Dockerfile` — 固定 Xray Core 镜像并使用 Python 3.12 Alpine 运行辅助服务
-- `scripts/start.sh` — 生成并持久化 UUID、REALITY 密钥、ML-KEM-768 VLESS Encryption 和订阅 token
-- `scripts/health_proxy.py` — `8080` 公共监听器；网站、健康检查、订阅和 XHTTP 透明转发共用一个入口
-- `scripts/generate.py` — 生成 Xray XHTTP + REALITY 配置以及标准 Base64 VLESS 订阅
-- `web/site/` — 3D Science Network 网站
-- `railway.toml` — 强制使用 Root `Dockerfile`，健康检查 `/health`
+这避免让 Railway TCP Proxy 的原始 XHTTP/REALITY 流量先经过 HTTP 分流器。
 
-### Root 单服务端口模型
+### 端口模型
 
 ```text
-Railway HTTP Domain ─────┐
-                         │
-Railway TCP Proxy :外部端口 ──> :8080 health_proxy
-                                      │
+Railway HTTPS Domain ───────────────> :8080 health_proxy
+                                      ├── /
                                       ├── /health
-                                      ├── /sub/<token>
-                                      ├── /api/network-info
-                                      ├── 静态网站
-                                      └── /xhttp/* ──> 127.0.0.1:10085 Xray
+                                      └── /sub/<token>
+
+Railway TCP Proxy :外部端口 ────────> :10085 Xray
+                                      └── VLESS + XHTTP + REALITY
 ```
 
-Xray 只监听 `127.0.0.1:10085`，公共 `8080` 由 health proxy 统一接入。这样 Railway HTTP Domain 与 TCP Proxy 可以同时指向同一个 Service；Railway 官方支持 HTTP 与 TCP 在同一 Service 上共存。citeturn2search2
+Xray 现在监听 `0.0.0.0:10085`，公共 HTTP 入口仍由 `health_proxy` 监听 `0.0.0.0:8080`。
 
-### Railway 设置
+Railway 官方支持同一个 Service 同时暴露 HTTP Domain 和 TCP Proxy；TCP Proxy 的目标端口可以独立指定。citeturn2search0turn2search6
+
+### Railway 必须这样设置
 
 1. Service Root Directory：仓库根目录 `/`
-2. 不要把 Root Directory 设置成 `vision`、`xhttp` 或 `web`
-3. Generate 一个 HTTP/HTTPS Domain
-4. 为同一个 Service 创建 TCP Proxy，Target/Application Port 填 `8080`
-5. 保留 Railway 自动注入的 `PORT`、`RAILWAY_TCP_PROXY_DOMAIN`、`RAILWAY_TCP_PROXY_PORT`
-6. 如需持久化身份和订阅 token，挂载 Railway Volume 到 `/data`
+2. 使用根目录 `Dockerfile`
+3. HTTP/HTTPS Domain 的 Target Port：`8080`
+4. 同一个 Service 创建 TCP Proxy
+5. **TCP Proxy 的 Application/Target Port：`10085`**
+6. 保留 Railway 自动注入的 `PORT`、`RAILWAY_TCP_PROXY_DOMAIN`、`RAILWAY_TCP_PROXY_PORT`
+7. 如需持久化身份和订阅 token，挂载 Railway Volume 到 `/data`
 
-Railway 会提供 `RAILWAY_TCP_PROXY_DOMAIN`、`RAILWAY_TCP_PROXY_PORT`，因此不需要手工把 TCP Proxy 外部地址写死在代码里。citeturn2search0
+注意：**GitHub 代码提交可以触发 Railway 重新部署，但 TCP Proxy 的 Application/Target Port 是 Railway Service Networking 设置，不会因为 GitHub 代码变化自动从 `8080` 改成 `10085`。必须在 Railway 的 TCP Proxy 设置中确认一次。** Railway 官方文档明确要求创建 TCP Proxy 时指定内部 application port；`RAILWAY_TCP_APPLICATION_PORT` 也会反映该设置。citeturn2search0turn2search2
 
-订阅地址会写入 Volume 的 `/data/subscription_url.txt`，格式为：
+如果 Railway 当前仍显示：
+
+```text
+TCP Proxy: thomas.proxy.rlwy.net:56144
+Application Port: 8080
+```
+
+请把 **Application Port 改为 `10085`**。
+
+外部客户端仍使用 Railway 分配的 **Host + 外部 Port**，不要使用内部 `10085`。
+
+### 订阅
+
+订阅地址仍然是：
 
 ```text
 https://<RAILWAY_PUBLIC_DOMAIN>/sub/<persistent-token>
 ```
+
+返回标准 Base64 VLESS subscription：
+
+```text
+VLESS + XHTTP + REALITY + ML-KEM-768
+```
+
+`SERVER_HOST` / `SERVER_PORT` 自动使用 Railway 提供的 `RAILWAY_TCP_PROXY_DOMAIN` / `RAILWAY_TCP_PROXY_PORT`，因此 TCP Proxy 外部地址发生变化时，重新部署后订阅会自动生成新的外部地址。citeturn2search2
 
 ## 原有三服务模式
 
@@ -62,46 +80,43 @@ https://<RAILWAY_PUBLIC_DOMAIN>/sub/<persistent-token>
 - `/xhttp`
 - `/web`
 
-两个 Xray Service 分别配置 TCP Proxy，Target 都指向内部 `8080`；Web Service 使用普通 HTTPS Domain。
-
-## 为什么增加 Root 单服务模式
-
-此前的部署失败日志显示 Railway 在仓库根目录使用 Railpack，并报告 `Script start.sh not found`，随后无法识别项目类型。fileciteturn10file0
-
-本修复分支在仓库根目录补齐 `Dockerfile`、`railway.toml` 和完整 `scripts/`，让根目录成为一个自包含 Docker 部署单元。Railway 官方文档说明，根目录存在名为 `Dockerfile` 的文件时会使用 Dockerfile 构建；也可以通过 Config as Code 明确指定 `DOCKERFILE`。citeturn1search0turn1search2
-
 ## 重要修复
 
-- 修复公共 `8080` 代理对 HTTP/XHTTP 请求头结束符判断错误的问题。
-- Xray 与公共 HTTP/TCP 入口分离：`127.0.0.1:10085` → `0.0.0.0:8080`。
+- 修复公共入口 HTTP Header CRLF 判断错误。
+- Xray 从 `127.0.0.1:10085` 改为 `0.0.0.0:10085`，允许 Railway TCP Proxy 直接访问。
+- HTTP Domain 和 TCP Proxy 使用独立内部端口。
+- TCP Proxy 不再依赖 Python HTTP/TCP 分流器处理 XHTTP/REALITY 首包。
 - Xray 启动前执行 `xray run -test -config`。
 - 等待 Xray 实际监听后才创建 `/data/.xray-ready`。
 - `/health` 在 Xray 未就绪时返回 `503`，就绪后返回 `200`。
 - UUID、REALITY key、ML-KEM-768 material、订阅 token 均可通过 Volume 持久化。
-- Railway TCP Proxy Host/Port 自动读取，不再要求手工复制外部端口。
-- 删除/忽略 `__pycache__`、`.pyc`、临时文件，避免污染 Docker build context。
+- 生成的 `client.json` 使用 Xray 当前的 `realitySettings.publicKey` 字段。
+- Railway TCP Proxy Host/Port 自动读取，不再要求手工把外部端口写死。
 
-## 订阅
+## 为什么这样改
 
-Root 单服务模式提供：
-
-```text
-https://<PUBLIC_DOMAIN>/sub/<TOKEN>
-```
-
-返回标准 Base64 VLESS subscription，节点为：
+最新生产日志已经证明：
 
 ```text
-VLESS + XHTTP + REALITY + ML-KEM-768
+[tcp-proxy] ACCEPT ... upstream=127.0.0.1:10085 ready=True
 ```
 
-Railway TCP Proxy 的外部端口由 Railway 分配，客户端必须使用 Railway 提供的 **外部 Host + 外部 Port**，不能把内部 `8080` 当成客户端端口。citeturn2search2
+但客户端对应连接没有任何首包：
+
+```text
+[tcp-proxy] ACCEPT peer=100.64.0.5:45766 ...
+[tcp-proxy] ERROR peer=100.64.0.5:45766 type=TimeoutError detail=timed out
+```
+
+也就是说连接到达了 Railway Service，但原始客户端数据没有进入 Xray。让 TCP Proxy 直接连接 Xray 的 `10085` 可以移除这个额外的协议分流层，缩短链路并使问题边界清晰。
 
 ## 测试顺序
 
-1. `/health` 返回 `200 OK`
-2. 3D 网站首页正常打开
-3. `/sub/<token>` 返回 Base64 内容
-4. 解码订阅，确认 `host:port` 是 Railway TCP Proxy 的外部地址
-5. 单独测试 XHTTP 节点
-6. 最后再考虑启用原有三服务双协议模式
+1. Railway HTTP Domain Target Port = `8080`
+2. Railway TCP Proxy Application/Target Port = `10085`
+3. `/health` 返回 `200 OK`
+4. `/sub/<token>` 返回 Base64 内容
+5. 导入订阅，确认节点仍使用 `thomas.proxy.rlwy.net:<Railway外部TCP端口>`
+6. 测试 XHTTP 节点
+7. 查看 Railway 日志，应看到 Xray `0.0.0.0:10085` 正常监听
+8. 如果 TCP Proxy 直接到 Xray 后仍失败，再根据 Xray REALITY/VLESS 握手日志继续定位
