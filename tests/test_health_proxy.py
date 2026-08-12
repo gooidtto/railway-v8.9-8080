@@ -26,7 +26,6 @@ def test_proxy_v1_header_is_removed():
 
 def test_proxy_v2_header_is_removed():
     tls = b"\x16\x03\x01\x00\x10" + b"x" * 20
-    # PROXY v2 signature + version/command + family/protocol + address length.
     header = MODULE.PROXY_V2_SIGNATURE + bytes([0x21, 0x11]) + (12).to_bytes(2, "big")
     header += b"\xcb\x00\x71\x0a\xc6\x33\x64\x0a\xd4\x31\x01\xbb"
     data = header + tls
@@ -40,3 +39,22 @@ def test_http_is_not_treated_as_tls():
     data = b"GET /health HTTP/1.1\r\nHost: example.test\r\n\r\n"
     assert MODULE.parse_http(data) == ("GET", "/health")
     assert not MODULE.is_tls(data)
+
+
+def test_unified_ingress_can_route_tls_and_http():
+    http = b"GET /health HTTP/1.1\r\nHost: example.test\r\n\r\n"
+    tls = b"\x16\x03\x01\x00\x10" + b"x" * 20
+    assert MODULE.parse_http(http) == ("GET", "/health")
+    assert MODULE.is_tls(tls)
+    assert not MODULE.is_tls(http)
+
+
+def test_fragmented_proxy_v1_header_waits_for_completion():
+    first = b"PROXY TCP4 203.0.113.10 198.51.100.10 54321"
+    second = b" 443\r\n\x16\x03\x01\x00\x10" + b"x" * 20
+    stripped, pending = MODULE._strip_proxy_header(first)
+    assert pending
+    assert stripped == first
+    stripped, pending = MODULE._strip_proxy_header(first + second)
+    assert not pending
+    assert MODULE.is_tls(stripped)
