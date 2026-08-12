@@ -15,7 +15,7 @@ RUN chmod 0755 /usr/local/bin/xray /opt/xray/scripts/*.sh /opt/xray/scripts/*.py
 
 ENV PORT=8080 \
     PUBLIC_HTTP_PORT=8080 \
-    XRAY_PORT=10085 \
+    XRAY_PORT=10087 \
     XRAY_HTTP_PORT=10086 \
     XRAY_LOGLEVEL=info \
     XRAY_READY_FILE=/data/.xray-ready \
@@ -31,11 +31,10 @@ ENV PORT=8080 \
     SUBSCRIPTION_FILE=/data/subscription.txt \
     SUBSCRIPTION_TOKEN_FILE=/data/subscription_token.txt
 
-# 8080 is the HTTP/HTTPS application port; 10085 is the raw Xray TCP/REALITY port.
-# PUBLIC_HTTP_PORT is deliberately independent from Railway's injected PORT so
-# adding a TCP proxy cannot move the HTTP listener onto the REALITY port.
-EXPOSE 8080 10085
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 CMD python3 -c "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/health' % os.getenv('PUBLIC_HTTP_PORT','8080'), timeout=3).read()"
+# Railway's PORT is the public gateway. The gateway multiplexes HTTP/subscription
+# and TLS/REALITY, while Xray itself remains private on 10087.
+EXPOSE 8080 10085 10087
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=5 CMD python3 -c "import os,urllib.request; p=os.getenv('PORT','8080'); urllib.request.urlopen('http://127.0.0.1:%s/health' % p, timeout=3).read()"
 
 USER root
 WORKDIR /opt/xray
