@@ -5,8 +5,10 @@ import threading
 from pathlib import Path
 from urllib.parse import urlsplit
 
-LISTEN_HOST = "0.0.0.0"
-LISTEN_PORT = int(os.getenv("GATEWAY_PORT", os.getenv("PUBLIC_HTTP_PORT", os.getenv("PORT", "8080"))))
+HTTP_LISTEN_HOST = "0.0.0.0"
+HTTP_LISTEN_PORT = int(os.getenv("PUBLIC_HTTP_PORT", "8080"))
+GATEWAY_LISTEN_HOST = "0.0.0.0"
+GATEWAY_LISTEN_PORT = int(os.getenv("GATEWAY_PORT", os.getenv("PORT", "10085")))
 REALITY_HOST = "127.0.0.1"
 REALITY_PORT = int(os.getenv("XRAY_PORT", "10087"))
 HTTP_XHTTP_HOST = "127.0.0.1"
@@ -125,8 +127,6 @@ def recv_initial(s, timeout=10):
             return raw, "tcp"
 
     raw = bytes(data)
-    if proxy_pending and not raw:
-        return b"", "empty"
     if not raw:
         return b"", "empty"
     if is_tls(raw):
@@ -179,9 +179,6 @@ def handle_http(c, method, path):
         return True
     head = method == "HEAD"
     if path == "/health":
-        # Railway's deployment health check verifies that the gateway process
-        # is alive. Xray readiness is reported separately at /ready so a brief
-        # startup window cannot mark an otherwise healthy deployment as failed.
         c.sendall(response(200, "text/plain; charset=utf-8", "OK\n", head))
         return True
     if path == "/ready":
@@ -218,7 +215,7 @@ def handle_http(c, method, path):
     return True
 
 
-def handle(c):
+def handle(c, allow_tls=True, listener="gateway"):
     peer = "unknown"
     up = None
     try:
@@ -227,34 +224,37 @@ def handle(c):
     except OSError:
         pass
     tune(c)
-    log(f"ACCEPT peer={peer} reality={REALITY_HOST}:{REALITY_PORT} http_xhttp={HTTP_XHTTP_HOST}:{HTTP_XHTTP_PORT} ready={ready()} proxy_protocol={PROXY_PROTOCOL}")
+    log(f"ACCEPT listener={listener} peer={peer} reality={REALITY_HOST}:{REALITY_PORT} http_xhttp={HTTP_XHTTP_HOST}:{HTTP_XHTTP_PORT} ready={ready()} proxy_protocol={PROXY_PROTOCOL}")
     try:
         initial, kind = recv_initial(c)
         if not initial:
-            log(f"CLOSE peer={peer} reason=no-initial-data")
+            log(f"CLOSE listener={listener} peer={peer} reason=no-initial-data")
             return
-        log(f"CLASSIFY peer={peer} kind={kind} bytes={len(initial)} head={initial[:12].hex()}")
+        log(f"CLASSIFY listener={listener} peer={peer} kind={kind} bytes={len(initial)} head={initial[:12].hex()}")
         if kind == "tls":
+            if not allow_tls:
+                log(f"CLOSE listener={listener} peer={peer} reason=tls-not-allowed")
+                return
             up = connect(REALITY_HOST, REALITY_PORT)
-            log(f"UPSTREAM_CONNECTED peer={peer} target={REALITY_HOST}:{REALITY_PORT} kind=tls-reality")
+            log(f"UPSTREAM_CONNECTED listener={listener} peer={peer} target={REALITY_HOST}:{REALITY_PORT} kind=tls-reality")
             a, b = relay(c, up, initial)
-            log(f"RELAY_END peer={peer} kind=tls-reality c2s={a} s2c={b}")
+            log(f"RELAY_END listener={listener} peer={peer} kind=tls-reality c2s={a} s2c={b}")
             return
         parsed = parse_http(initial)
         if parsed:
             method, path = parsed
-            log(f"HTTP peer={peer} method={method} path={path}")
+            log(f"HTTP listener={listener} peer={peer} method={method} path={path}")
             if handle_http(c, method, path):
-                log(f"HTTP_END peer={peer} path={path}")
+                log(f"HTTP_END listener={listener} peer={peer} path={path}")
                 return
             kind = "http-xhttp"
         target = (HTTP_XHTTP_HOST, HTTP_XHTTP_PORT) if kind == "http-xhttp" else (REALITY_HOST, REALITY_PORT)
         up = connect(*target)
-        log(f"UPSTREAM_CONNECTED peer={peer} target={target[0]}:{target[1]} kind={kind}")
+        log(f"UPSTREAM_CONNECTED listener={listener} peer={peer} target={target[0]}:{target[1]} kind={kind}")
         a, b = relay(c, up, initial)
-        log(f"RELAY_END peer={peer} kind={kind} c2s={a} s2c={b}")
+        log(f"RELAY_END listener={listener} peer={peer} kind={kind} c2s={a} s2c={b}")
     except (OSError, TimeoutError) as e:
-        log(f"ERROR peer={peer} type={type(e).__name__} detail={e}")
+        log(f"ERROR listener={listener} peer={peer} type={type(e).__name__} detail={e}")
     finally:
         if up:
             try:
@@ -265,18 +265,32 @@ def handle(c):
             c.close()
         except OSError:
             pass
-        log(f"CLOSE peer={peer}")
+        log(f"CLOSE listener={listener} peer={peer}")
+
+
+def serve(port, allow_tls, listener):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((HTTP_LISTEN_HOST if listener == "http" else GATEWAY_LISTEN_HOST, port))
+        s.listen(256)
+        log(f"LISTEN listener={listener} 0.0.0.0:{port} tls={allow_tls} reality={REALITY_HOST}:{REALITY_PORT} http_xhttp={HTTP_XHTTP_HOST}:{HTTP_XHTTP_PORT}")
+        while True:
+            c, _ = s.accept()
+            threading.Thread(target=handle, args=(c, allow_tls, listener), daemon=True).start()
 
 
 def main():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind((LISTEN_HOST, LISTEN_PORT))
-        s.listen(256)
-        log(f"LISTEN {LISTEN_HOST}:{LISTEN_PORT} reality={REALITY_HOST}:{REALITY_PORT} http_xhttp={HTTP_XHTTP_HOST}:{HTTP_XHTTP_PORT} xhttp={XHTTP_PATH} proxy_protocol={PROXY_PROTOCOL}")
-        while True:
-            c, _ = s.accept()
-            threading.Thread(target=handle, args=(c,), daemon=True).start()
+    if HTTP_LISTEN_PORT == GATEWAY_LISTEN_PORT:
+        serve(GATEWAY_LISTEN_PORT, True, "gateway")
+        return
+    threads = [
+        threading.Thread(target=serve, args=(HTTP_LISTEN_PORT, False, "http"), daemon=True),
+        threading.Thread(target=serve, args=(GATEWAY_LISTEN_PORT, True, "gateway"), daemon=True),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
 
 
 if __name__ == "__main__":
