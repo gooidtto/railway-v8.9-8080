@@ -16,6 +16,7 @@ def env(name, default=None, required=False):
 data_dir = Path(env("DATA_DIR", "/data"))
 config_path = Path(env("CONFIG", "/etc/xray/config.json"))
 xray_port = int(env("XRAY_PORT", "10085"))
+xray_listen = env("XRAY_LISTEN", "0.0.0.0")
 uuid = env("UUID", required=True)
 private_key = env("PRIVATE_KEY", required=True)
 public_key = env("PUBLIC_KEY", required=True)
@@ -66,7 +67,7 @@ no_subscription = "--no-subscription" in os.sys.argv
 config = {
     "log": {"loglevel": env("XRAY_LOGLEVEL", "info")},
     "inbounds": [{
-        "listen": "127.0.0.1",
+        "listen": xray_listen,
         "port": xray_port,
         "protocol": "vless",
         "settings": {
@@ -120,6 +121,7 @@ if not (host and server_port):
             json.dump({
                 "subscription": "unavailable",
                 "reason": "Railway TCP Proxy not configured",
+                "xray_listen": xray_listen,
                 "xray_port": xray_port,
                 "vless_encryption": "ML-KEM-768",
             }, f, indent=2)
@@ -163,7 +165,7 @@ client = {
         "streamSettings": {
             "network": "xhttp",
             "security": "reality",
-            "realitySettings": {"serverName": sni, "fingerprint": fingerprint, "password": public_key, "shortId": short_id},
+            "realitySettings": {"serverName": sni, "fingerprint": fingerprint, "publicKey": public_key, "shortId": short_id},
             "xhttpSettings": {"path": xhttp_path, "mode": xhttp_mode},
         },
     }],
@@ -182,6 +184,7 @@ summary = {
     "sni": sni,
     "server_host": host,
     "server_port": int(server_port),
+    "xray_listen": xray_listen,
     "xray_port": xray_port,
     "subscription_file": str(data_dir / "subscription.txt"),
     "subscription_endpoint": "/sub/<token>",
