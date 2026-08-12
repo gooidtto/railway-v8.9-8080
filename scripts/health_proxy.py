@@ -28,6 +28,10 @@ INFO_RATE_LOCK = threading.Lock()
 INFO_RATE_WINDOW = float(os.getenv("INFO_RATE_WINDOW", "5"))
 
 
+def log(message):
+    print(f"[tcp-proxy] {message}", flush=True)
+
+
 def valid_ip(value):
     try:
         ip = ipaddress.ip_address(value.strip())
@@ -165,18 +169,45 @@ def xray_ready():
     return os.path.exists(READY_FILE)
 
 
-def relay(a, b):
+def socket_tune(sock):
+    try:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except OSError:
+        pass
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except OSError:
+        pass
+
+
+def relay(a, b, initial_a=b""):
+    """Bidirectional byte relay for long-lived XHTTP/REALITY connections."""
+    socket_tune(a)
+    socket_tune(b)
+    try:
+        a.settimeout(None)
+        b.settimeout(None)
+    except OSError:
+        pass
+    if initial_a:
+        b.sendall(initial_a)
+    bytes_a_to_b = len(initial_a)
+    bytes_b_to_a = 0
     sockets = [a, b]
     while True:
         readable, _, exceptional = select.select(sockets, [], sockets, 300)
         if exceptional or not readable:
-            return
+            return bytes_a_to_b, bytes_b_to_a
         for src in readable:
             dst = b if src is a else a
             chunk = src.recv(65536)
             if not chunk:
-                return
+                return bytes_a_to_b, bytes_b_to_a
             dst.sendall(chunk)
+            if src is a:
+                bytes_a_to_b += len(chunk)
+            else:
+                bytes_b_to_a += len(chunk)
 
 
 def serve_static(client, path, head_only=False):
@@ -257,59 +288,93 @@ def handle_http(client, method, path, headers, peer_ip):
     return True
 
 
-def peek_http_header(client, max_bytes=16384, timeout=5.0):
-    deadline = time.monotonic() + timeout
-    while True:
-        remaining = max(0.05, deadline - time.monotonic())
-        client.settimeout(remaining)
-        try:
-            buffered = client.recv(max_bytes, socket.MSG_PEEK)
-        except socket.timeout:
-            return b""
-        if not buffered:
-            return b""
-        # Important: these are actual CRLF bytes, not the literal characters
-        # backslash-r/backslash-n. A previous build used the latter and could
-        # wait until timeout on every ordinary HTTP/XHTTP request.
-        if b"\r\n\r\n" in buffered or b"\n\n" in buffered:
-            return buffered
-        if len(buffered) >= max_bytes:
-            return buffered
-        time.sleep(0.005)
+def is_tls_client_hello(data):
+    return len(data) >= 3 and data[0] == 0x16 and data[1] == 0x03 and data[2] in {0x01, 0x02, 0x03, 0x04}
+
+
+def recv_initial(client, max_bytes=16384, timeout=10.0):
+    """Read enough bytes to classify TLS passthrough or an ordinary HTTP request."""
+    client.settimeout(timeout)
+    data = bytearray()
+    while len(data) < max_bytes:
+        chunk = client.recv(min(4096, max_bytes - len(data)))
+        if not chunk:
+            break
+        data.extend(chunk)
+        raw = bytes(data)
+        if is_tls_client_hello(raw):
+            return raw, "tls"
+        if b"\r\n\r\n" in raw or b"\n\n" in raw:
+            return raw, "http"
+        if len(raw) >= 3 and not raw.startswith((b"GET ", b"HEAD ", b"POST ", b"PUT ", b"DELETE ", b"OPTIONS ", b"PATCH ", b"CONNECT ")):
+            return raw, "tcp"
+    return bytes(data), "http" if data else "empty"
 
 
 def handle(client):
-    client.settimeout(5)
     upstream = None
+    peer = "unknown"
     try:
-        buffered = peek_http_header(client)
-        if not buffered:
+        peer = f"{client.getpeername()[0]}:{client.getpeername()[1]}"
+    except OSError:
+        pass
+    socket_tune(client)
+    log(f"ACCEPT peer={peer} listen={LISTEN_HOST}:{LISTEN_PORT} upstream={UPSTREAM_HOST}:{UPSTREAM_PORT} ready={xray_ready()}")
+    try:
+        initial, kind = recv_initial(client)
+        if not initial or kind == "empty":
+            log(f"CLOSE peer={peer} reason=no-initial-data")
             return
-        parsed = parse_http_request(buffered)
+        log(f"CLASSIFY peer={peer} kind={kind} bytes={len(initial)} head={initial[:12].hex()}")
+
+        if kind == "tls":
+            upstream = socket.create_connection((UPSTREAM_HOST, UPSTREAM_PORT), timeout=10)
+            socket_tune(upstream)
+            log(f"UPSTREAM_CONNECTED peer={peer} target={UPSTREAM_HOST}:{UPSTREAM_PORT} kind=tls")
+            a2b, b2a = relay(client, upstream, initial)
+            log(f"RELAY_END peer={peer} kind=tls c2s={a2b} s2c={b2a}")
+            return
+
+        parsed = parse_http_request(initial)
         if parsed:
             method, path, headers = parsed
+            log(f"HTTP peer={peer} method={method} path={path}")
             result = handle_http(client, method, path, headers, client.getpeername()[0])
             if result is not False:
+                log(f"HTTP_END peer={peer} path={path}")
                 return
-        upstream = socket.create_connection((UPSTREAM_HOST, UPSTREAM_PORT), timeout=5)
-        relay(client, upstream)
-    except (OSError, TimeoutError):
-        pass
+            kind = "http-xhttp"
+
+        upstream = socket.create_connection((UPSTREAM_HOST, UPSTREAM_PORT), timeout=10)
+        socket_tune(upstream)
+        log(f"UPSTREAM_CONNECTED peer={peer} target={UPSTREAM_HOST}:{UPSTREAM_PORT} kind={kind}")
+        a2b, b2a = relay(client, upstream, initial)
+        log(f"RELAY_END peer={peer} kind={kind} c2s={a2b} s2c={b2a}")
+    except (OSError, TimeoutError) as exc:
+        log(f"ERROR peer={peer} type={type(exc).__name__} detail={exc}")
     finally:
         if upstream is not None:
             try:
                 upstream.close()
             except OSError:
                 pass
-        client.close()
+        try:
+            client.close()
+        except OSError:
+            pass
+        log(f"CLOSE peer={peer}")
 
 
 def main():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         server.bind((LISTEN_HOST, LISTEN_PORT))
         server.listen(256)
-        print(f"public listener {LISTEN_HOST}:{LISTEN_PORT}; site=/; health=/health; sub=/sub; xhttp={XHTTP_PATH}; xray={UPSTREAM_HOST}:{UPSTREAM_PORT}", flush=True)
+        log(
+            f"LISTEN {LISTEN_HOST}:{LISTEN_PORT} xray={UPSTREAM_HOST}:{UPSTREAM_PORT} "
+            f"xhttp={XHTTP_PATH} railway_tcp_app_port={os.getenv('RAILWAY_TCP_APPLICATION_PORT', '') or 'unset'}"
+        )
         while True:
             client, _ = server.accept()
             threading.Thread(target=handle, args=(client,), daemon=True).start()
