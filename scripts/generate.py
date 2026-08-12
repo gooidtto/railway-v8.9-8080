@@ -60,8 +60,18 @@ xhttp_path = env("XHTTP_PATH", "/xhttp")
 xhttp_mode = env("XHTTP_MODE", "auto")
 short_id = env("SHORT_ID", "50175c035ee132")
 subscription_token = env("SUBSCRIPTION_TOKEN", "")
-host = env("SERVER_HOST", "").strip()
-server_port = env("SERVER_PORT", "").strip()
+
+# A dedicated Railway TCP Proxy is the authoritative public endpoint for
+# REALITY. Do not silently fall back to a TCP proxy targeting the HTTP port.
+dedicated_host = env("XRAY_TCP_PROXY_HOST", "").strip()
+dedicated_port = env("XRAY_TCP_PROXY_PORT", "").strip()
+if bool(dedicated_host) != bool(dedicated_port):
+    raise SystemExit("ERROR: XRAY_TCP_PROXY_HOST and XRAY_TCP_PROXY_PORT must be set together")
+if dedicated_port and (not dedicated_port.isdigit() or not 1 <= int(dedicated_port) <= 65535):
+    raise SystemExit("ERROR: XRAY_TCP_PROXY_PORT must be 1-65535")
+
+host = dedicated_host or env("SERVER_HOST", "").strip()
+server_port = dedicated_port or env("SERVER_PORT", "").strip()
 public_domain = env("RAILWAY_PUBLIC_DOMAIN", "").strip()
 
 reality_inbound = {
