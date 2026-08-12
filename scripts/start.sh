@@ -17,10 +17,11 @@ RAILWAY_TCP_APPLICATION_PORT_VALUE="${RAILWAY_TCP_APPLICATION_PORT:-}"
 
 # Endpoint selection:
 # 1. Explicit SERVER/TCP override wins.
-# 2. A dedicated XRAY_TCP_PROXY_* endpoint is authoritative for REALITY.
-# 3. Railway's generic TCP proxy is used only when its application port is
-#    exactly the Xray port. A proxy targeting PORT=8080 must never be
-#    advertised as a REALITY endpoint.
+# 2. XRAY_TCP_PROXY_* is authoritative for REALITY.
+# 3. Railway metadata is accepted when it targets Xray 10085. If Railway
+#    exposes DOMAIN/PORT but omits APPLICATION_PORT, this single-service
+#    deployment treats that endpoint as the REALITY TCP endpoint. A known
+#    target of public HTTP 8080 is never advertised as REALITY.
 SERVER_HOST="${SERVER_HOST:-${TCP_PROXY_HOST:-}}"
 SERVER_PORT="${SERVER_PORT:-${TCP_PROXY_PORT:-}}"
 
@@ -42,17 +43,24 @@ if [ -n "${XRAY_TCP_PROXY_HOST:-}" ] || [ -n "${XRAY_TCP_PROXY_PORT:-}" ]; then
   SERVER_PORT="$XRAY_TCP_PROXY_PORT"
   echo "Using dedicated Xray TCP proxy ${SERVER_HOST}:${SERVER_PORT} -> internal ${XRAY_PORT}." >&2
 elif [ -z "$SERVER_HOST" ] && [ -z "$SERVER_PORT" ]; then
-  if [ -n "${RAILWAY_TCP_PROXY_DOMAIN:-}" ] && [ -n "${RAILWAY_TCP_PROXY_PORT:-}" ] && [ "${RAILWAY_TCP_APPLICATION_PORT_VALUE:-}" = "$XRAY_PORT" ]; then
-    SERVER_HOST="$RAILWAY_TCP_PROXY_DOMAIN"
-    SERVER_PORT="$RAILWAY_TCP_PROXY_PORT"
-    echo "Using Railway TCP proxy ${SERVER_HOST}:${SERVER_PORT} -> internal ${XRAY_PORT}." >&2
-  elif [ -n "${RAILWAY_TCP_PROXY_DOMAIN:-}" ] && [ -n "${RAILWAY_TCP_PROXY_PORT:-}" ]; then
-    echo "WARNING: Railway TCP proxy ${RAILWAY_TCP_PROXY_DOMAIN}:${RAILWAY_TCP_PROXY_PORT} targets application port ${RAILWAY_TCP_APPLICATION_PORT_VALUE:-unknown}, not Xray ${XRAY_PORT}; it will not be used for REALITY." >&2
-    SERVER_HOST=""
-    SERVER_PORT=""
-  else
-    SERVER_HOST="${XRAY_TCP_PROXY_HOST:-}"
-    SERVER_PORT="${XRAY_TCP_PROXY_PORT:-}"
+  if [ -n "${RAILWAY_TCP_PROXY_DOMAIN:-}" ] && [ -n "${RAILWAY_TCP_PROXY_PORT:-}" ]; then
+    if [ -n "$RAILWAY_TCP_APPLICATION_PORT_VALUE" ] && [ "$RAILWAY_TCP_APPLICATION_PORT_VALUE" = "$PORT" ]; then
+      echo "WARNING: Railway TCP proxy ${RAILWAY_TCP_PROXY_DOMAIN}:${RAILWAY_TCP_PROXY_PORT} targets public HTTP port $PORT; it will not be used for REALITY." >&2
+      SERVER_HOST=""
+      SERVER_PORT=""
+    elif [ -z "$RAILWAY_TCP_APPLICATION_PORT_VALUE" ] || [ "$RAILWAY_TCP_APPLICATION_PORT_VALUE" = "$XRAY_PORT" ]; then
+      SERVER_HOST="$RAILWAY_TCP_PROXY_DOMAIN"
+      SERVER_PORT="$RAILWAY_TCP_PROXY_PORT"
+      if [ -z "$RAILWAY_TCP_APPLICATION_PORT_VALUE" ]; then
+        echo "Using Railway TCP proxy ${SERVER_HOST}:${SERVER_PORT} -> assumed Xray internal ${XRAY_PORT} (Railway target-port metadata unset)." >&2
+      else
+        echo "Using Railway TCP proxy ${SERVER_HOST}:${SERVER_PORT} -> internal ${XRAY_PORT}." >&2
+      fi
+    else
+      echo "WARNING: Railway TCP proxy ${RAILWAY_TCP_PROXY_DOMAIN}:${RAILWAY_TCP_PROXY_PORT} targets unknown application port ${RAILWAY_TCP_APPLICATION_PORT_VALUE}; it will not be used for REALITY." >&2
+      SERVER_HOST=""
+      SERVER_PORT=""
+    fi
   fi
 fi
 
