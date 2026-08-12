@@ -12,6 +12,7 @@ REALITY_FINGERPRINT="${REALITY_FINGERPRINT:-chrome}"
 XHTTP_PATH="${XHTTP_PATH:-/xhttp}"
 XHTTP_MODE="${XHTTP_MODE:-auto}"
 SHORT_ID="${SHORT_ID:-50175c035ee132}"
+TCP_PROXY_PROTOCOL="${TCP_PROXY_PROTOCOL:-auto}"
 RAILWAY_TCP_APPLICATION_PORT_VALUE="${RAILWAY_TCP_APPLICATION_PORT:-}"
 
 # Endpoint selection:
@@ -60,6 +61,7 @@ SUB_TOKEN_FILE="$DATA_DIR/subscription_token.txt"
 HEALTH_PID=""
 XRAY_PID=""
 
+case "$TCP_PROXY_PROTOCOL" in auto|on|off) ;; *) echo "ERROR: TCP_PROXY_PROTOCOL must be auto, on, or off" >&2; exit 1;; esac
 case "$XHTTP_PATH" in /*) ;; *) echo "ERROR: XHTTP_PATH must start with /" >&2; exit 1;; esac
 case "$SHORT_ID" in ''|*[!0-9a-fA-F]*) echo "ERROR: SHORT_ID must be hexadecimal" >&2; exit 1;; esac
 if [ $(( ${#SHORT_ID} % 2 )) -ne 0 ] || [ ${#SHORT_ID} -gt 16 ]; then
@@ -142,7 +144,7 @@ fi
 case "$SUBSCRIPTION_TOKEN" in *[!A-Za-z0-9_-]*|'') echo "ERROR: invalid subscription token" >&2; exit 1;; esac
 chmod 0600 "$SUB_TOKEN_FILE"
 
-export DATA_DIR PORT XRAY_PORT XRAY_LISTEN CONFIG REALITY_TARGET REALITY_SNI REALITY_FINGERPRINT XHTTP_PATH XHTTP_MODE SHORT_ID UUID PRIVATE_KEY PUBLIC_KEY VLESS_DECRYPTION VLESS_ENCRYPTION SERVER_HOST SERVER_PORT SUBSCRIPTION_TOKEN XRAY_READY_FILE="$READY_FILE"
+export DATA_DIR PORT XRAY_PORT XRAY_LISTEN CONFIG REALITY_TARGET REALITY_SNI REALITY_FINGERPRINT XHTTP_PATH XHTTP_MODE SHORT_ID UUID PRIVATE_KEY PUBLIC_KEY VLESS_DECRYPTION VLESS_ENCRYPTION SERVER_HOST SERVER_PORT SUBSCRIPTION_TOKEN TCP_PROXY_PROTOCOL XRAY_READY_FILE="$READY_FILE"
 
 python3 /opt/xray/scripts/health_proxy.py & HEALTH_PID=$!
 cleanup(){
@@ -156,6 +158,7 @@ trap cleanup INT TERM EXIT
 
 echo "TCP subscription endpoint: ${SERVER_HOST:-disabled}" >&2
 echo "Railway TCP application port reported: ${RAILWAY_TCP_APPLICATION_PORT_VALUE:-unset}; Xray port: ${XRAY_PORT}" >&2
+echo "TCP PROXY protocol mode: $TCP_PROXY_PROTOCOL" >&2
 echo "VLESS Encryption: ML-KEM-768 (Post-Quantum) enabled" >&2
 echo "REALITY target: $REALITY_TARGET" >&2
 python3 /opt/xray/scripts/generate.py --no-subscription
