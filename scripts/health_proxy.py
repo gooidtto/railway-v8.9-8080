@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 LISTEN_HOST = "0.0.0.0"
-LISTEN_PORT = int(os.getenv("PORT", "8080"))
+LISTEN_PORT = int(os.getenv("PUBLIC_HTTP_PORT", os.getenv("PORT", "8080")))
 REALITY_HOST = "127.0.0.1"
 REALITY_PORT = int(os.getenv("XRAY_PORT", "10085"))
 HTTP_XHTTP_HOST = "127.0.0.1"
@@ -72,7 +72,6 @@ def is_tls(data):
 
 
 def _proxy_header_length(data):
-    """Return PROXY protocol header length, 0 if absent, None if incomplete."""
     if PROXY_PROTOCOL == "off":
         return 0
     if data.startswith(b"PROXY "):
@@ -87,16 +86,6 @@ def _proxy_header_length(data):
         total = 16 + length
         return total if len(data) >= total else None
     return 0
-
-
-def _strip_proxy_header(data):
-    length = _proxy_header_length(data)
-    if length is None:
-        return data, True
-    if length:
-        log(f"PROXY_PROTOCOL header={length} bytes")
-        return data[length:], False
-    return data, False
 
 
 def recv_initial(s, timeout=10):
@@ -183,8 +172,6 @@ def token():
 
 
 def handle_http(c, method, path):
-    # XHTTP is an HTTP transport and may use POST/GET. It must be routed before
-    # the website's GET/HEAD method restriction.
     if path == XHTTP_PATH or path.startswith(XHTTP_PATH + "/"):
         return False
     if method not in {"GET", "HEAD"}:
