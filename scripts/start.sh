@@ -13,30 +13,30 @@ XHTTP_PATH="${XHTTP_PATH:-/xhttp}"
 XHTTP_MODE="${XHTTP_MODE:-auto}"
 SHORT_ID="${SHORT_ID:-50175c035ee132}"
 RAILWAY_TCP_APPLICATION_PORT_VALUE="${RAILWAY_TCP_APPLICATION_PORT:-}"
-EXPLICIT_TCP_PROXY=0
-if [ -n "${SERVER_HOST:-}" ] || [ -n "${SERVER_PORT:-}" ] || [ -n "${TCP_PROXY_HOST:-}" ] || [ -n "${TCP_PROXY_PORT:-}" ]; then
-  EXPLICIT_TCP_PROXY=1
-fi
 
+# Endpoint selection:
+# 1. Explicit SERVER/TCP override wins.
+# 2. Railway's advertised TCP proxy is preferred even when it targets PORT=8080,
+#    because the local health_proxy multiplexes HTTP and raw TLS to Xray:10085.
+# 3. XRAY_TCP_PROXY_* is the explicit fallback for a dedicated 10085 proxy.
 SERVER_HOST="${SERVER_HOST:-${TCP_PROXY_HOST:-}}"
 SERVER_PORT="${SERVER_PORT:-${TCP_PROXY_PORT:-}}"
-
-# Railway exposes a singular TCP proxy through RAILWAY_TCP_PROXY_*. When a
-# service has had multiple TCP proxies, Railway can retain metadata for the
-# old proxy (for example 56144 -> 8080) even after the Xray proxy is changed.
-# Prefer an explicit operator override, then a correctly targeted Railway
-# proxy. If Railway metadata is stale, use the known Xray proxy endpoint so the
-# generated subscription cannot silently point at the HTTP listener.
 if [ -z "$SERVER_HOST" ] && [ -z "$SERVER_PORT" ]; then
-  if [ -n "${RAILWAY_TCP_PROXY_DOMAIN:-}" ] && [ "${RAILWAY_TCP_APPLICATION_PORT_VALUE:-}" = "$XRAY_PORT" ]; then
+  if [ -n "${RAILWAY_TCP_PROXY_DOMAIN:-}" ] && [ -n "${RAILWAY_TCP_PROXY_PORT:-}" ]; then
     SERVER_HOST="$RAILWAY_TCP_PROXY_DOMAIN"
-    SERVER_PORT="${RAILWAY_TCP_PROXY_PORT:-}"
+    SERVER_PORT="$RAILWAY_TCP_PROXY_PORT"
+    echo "Using Railway TCP proxy ${SERVER_HOST}:${SERVER_PORT} -> internal ${RAILWAY_TCP_APPLICATION_PORT_VALUE:-unknown}; local proxy forwards raw TLS to Xray:${XRAY_PORT}." >&2
   else
-    SERVER_HOST="${XRAY_TCP_PROXY_HOST:-kodama.proxy.rlwy.net}"
-    SERVER_PORT="${XRAY_TCP_PROXY_PORT:-46621}"
-    echo "WARNING: Railway TCP proxy metadata is stale or targets ${RAILWAY_TCP_APPLICATION_PORT_VALUE:-unset}; using Xray TCP proxy ${SERVER_HOST}:${SERVER_PORT}. Set XRAY_TCP_PROXY_HOST/PORT explicitly if the Railway endpoint changes." >&2
+    SERVER_HOST="${XRAY_TCP_PROXY_HOST:-}"
+    SERVER_PORT="${XRAY_TCP_PROXY_PORT:-}"
+    if [ -z "$SERVER_HOST" ] || [ -z "$SERVER_PORT" ]; then
+      echo "ERROR: no TCP proxy endpoint is available for subscription generation" >&2
+      exit 1
+    fi
+    echo "Using explicit Xray TCP proxy ${SERVER_HOST}:${SERVER_PORT}." >&2
   fi
 fi
+
 READY_FILE="$DATA_DIR/.xray-ready"
 SUB_TOKEN_FILE="$DATA_DIR/subscription_token.txt"
 HEALTH_PID=""
@@ -50,10 +50,6 @@ if [ $(( ${#SHORT_ID} % 2 )) -ne 0 ] || [ ${#SHORT_ID} -gt 16 ]; then
 fi
 if [ "$XRAY_PORT" = "$PORT" ]; then
   echo "ERROR: XRAY_PORT must differ from public PORT" >&2
-  exit 1
-fi
-if [ -z "$SERVER_HOST" ] || [ -z "$SERVER_PORT" ]; then
-  echo "ERROR: no TCP proxy endpoint is available for subscription generation" >&2
   exit 1
 fi
 
@@ -80,17 +76,17 @@ if [ -s "$PRIVATE_KEY_FILE" ] && [ -s "$PUBLIC_KEY_FILE" ]; then
   PUBLIC_KEY=$(tr -d '[:space:]' < "$PUBLIC_KEY_FILE")
 else
   KEY_OUTPUT=""
-  KEY_STATUS=0
-  if KEY_OUTPUT=$(xray x25519 2>&1); then KEY_STATUS=0; else KEY_STATUS=$?; fi
-  PRIVATE_KEY=$(printf '%s\n' "$KEY_OUTPUT" | awk '{gsub(/\r/,""); sub(/^[[:space:]]+/,"")} $0 ~ /^PrivateKey[[:space:]]*:/ {sub(/^[^:]*:[[:space:]]*/,""); print; exit} $0 ~ /^Private[[:space:]]+key[[:space:]]*:/ {sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
-  PUBLIC_KEY=$(printf '%s\n' "$KEY_OUTPUT" | awk '{gsub(/\r/,""); sub(/^[[:space:]]+/,"")} $0 ~ /^Password([[:space:]]*\([^)]*\))?[[:space:]]*:/ {sub(/^[^:]*:[[:space:]]*/,""); print; exit} $0 ~ /^Public[[:space:]]+key[[:space:]]*:/ {sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
-  if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
-    echo "ERROR: unable to parse x25519 key output" >&2
-    echo "ERROR: xray x25519 exit status: $KEY_STATUS" >&2
+  if ! KEY_OUTPUT=$(xray x25519 2>&1); then
+    echo "ERROR: xray x25519 failed" >&2
+    echo "$KEY_OUTPUT" >&2
     exit 1
   fi
-  case "$PRIVATE_KEY" in *[!A-Za-z0-9_-]*|'') echo "ERROR: parsed PrivateKey is invalid" >&2; exit 1;; esac
-  case "$PUBLIC_KEY" in *[!A-Za-z0-9_-]*|'') echo "ERROR: parsed public key is invalid" >&2; exit 1;; esac
+  PRIVATE_KEY=$(printf '%s\n' "$KEY_OUTPUT" | awk '/^PrivateKey[[:space:]]*:/ {sub(/^[^:]*:[[:space:]]*/,""); print; exit} /^Private[[:space:]]+key[[:space:]]*:/ {sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
+  PUBLIC_KEY=$(printf '%s\n' "$KEY_OUTPUT" | awk '/^Password([[:space:]]*\([^)]*\))?[[:space:]]*:/ {sub(/^[^:]*:[[:space:]]*/,""); print; exit} /^Public[[:space:]]+key[[:space:]]*:/ {sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
+  if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
+    echo "ERROR: unable to parse x25519 key output" >&2
+    exit 1
+  fi
   printf '%s\n' "$PRIVATE_KEY" > "$PRIVATE_KEY_FILE"
   printf '%s\n' "$PUBLIC_KEY" > "$PUBLIC_KEY_FILE"
 fi
@@ -114,8 +110,6 @@ else
     echo "ERROR: unable to parse ML-KEM-768 VLESS Encryption output" >&2
     exit 1
   fi
-  case "$VLESS_DECRYPTION" in *[!A-Za-z0-9._-]*|'') echo "ERROR: invalid VLESS decryption value" >&2; exit 1;; esac
-  case "$VLESS_ENCRYPTION" in *[!A-Za-z0-9._-]*|'') echo "ERROR: invalid VLESS encryption value" >&2; exit 1;; esac
   printf '%s\n' "$VLESS_DECRYPTION" > "$VLESS_DECRYPTION_FILE"
   printf '%s\n' "$VLESS_ENCRYPTION" > "$VLESS_ENCRYPTION_FILE"
   chmod 0600 "$VLESS_DECRYPTION_FILE" "$VLESS_ENCRYPTION_FILE"
