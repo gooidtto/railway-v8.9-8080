@@ -17,13 +17,25 @@ EXPLICIT_TCP_PROXY=0
 if [ -n "${SERVER_HOST:-}" ] || [ -n "${SERVER_PORT:-}" ] || [ -n "${TCP_PROXY_HOST:-}" ] || [ -n "${TCP_PROXY_PORT:-}" ]; then
   EXPLICIT_TCP_PROXY=1
 fi
-# Explicit values take precedence. Railway's singular TCP proxy variables are
-# ambiguous when more than one TCP proxy exists on the same service.
+
 SERVER_HOST="${SERVER_HOST:-${TCP_PROXY_HOST:-}}"
 SERVER_PORT="${SERVER_PORT:-${TCP_PROXY_PORT:-}}"
+
+# Railway exposes a singular TCP proxy through RAILWAY_TCP_PROXY_*. When a
+# service has had multiple TCP proxies, Railway can retain metadata for the
+# old proxy (for example 56144 -> 8080) even after the Xray proxy is changed.
+# Prefer an explicit operator override, then a correctly targeted Railway
+# proxy. If Railway metadata is stale, use the known Xray proxy endpoint so the
+# generated subscription cannot silently point at the HTTP listener.
 if [ -z "$SERVER_HOST" ] && [ -z "$SERVER_PORT" ]; then
-  SERVER_HOST="${RAILWAY_TCP_PROXY_DOMAIN:-}"
-  SERVER_PORT="${RAILWAY_TCP_PROXY_PORT:-}"
+  if [ -n "${RAILWAY_TCP_PROXY_DOMAIN:-}" ] && [ "${RAILWAY_TCP_APPLICATION_PORT_VALUE:-}" = "$XRAY_PORT" ]; then
+    SERVER_HOST="$RAILWAY_TCP_PROXY_DOMAIN"
+    SERVER_PORT="${RAILWAY_TCP_PROXY_PORT:-}"
+  else
+    SERVER_HOST="${XRAY_TCP_PROXY_HOST:-kodama.proxy.rlwy.net}"
+    SERVER_PORT="${XRAY_TCP_PROXY_PORT:-46621}"
+    echo "WARNING: Railway TCP proxy metadata is stale or targets ${RAILWAY_TCP_APPLICATION_PORT_VALUE:-unset}; using Xray TCP proxy ${SERVER_HOST}:${SERVER_PORT}. Set XRAY_TCP_PROXY_HOST/PORT explicitly if the Railway endpoint changes." >&2
+  fi
 fi
 READY_FILE="$DATA_DIR/.xray-ready"
 SUB_TOKEN_FILE="$DATA_DIR/subscription_token.txt"
@@ -38,13 +50,6 @@ if [ $(( ${#SHORT_ID} % 2 )) -ne 0 ] || [ ${#SHORT_ID} -gt 16 ]; then
 fi
 if [ "$XRAY_PORT" = "$PORT" ]; then
   echo "ERROR: XRAY_PORT must differ from public PORT" >&2
-  exit 1
-fi
-# With multiple TCP proxies, Railway's singular RAILWAY_TCP_PROXY_* variables
-# can refer to the wrong proxy. Never publish a subscription for a proxy whose
-# reported target is the HTTP port unless the operator explicitly overrides it.
-if [ "$EXPLICIT_TCP_PROXY" -eq 0 ] && [ -n "$RAILWAY_TCP_APPLICATION_PORT_VALUE" ] && [ "$RAILWAY_TCP_APPLICATION_PORT_VALUE" != "$XRAY_PORT" ]; then
-  echo "ERROR: Railway TCP proxy target is ${RAILWAY_TCP_APPLICATION_PORT_VALUE}, but Xray listens on ${XRAY_PORT}. Remove the stale TCP proxy or set TCP_PROXY_HOST/TCP_PROXY_PORT to the proxy targeting ${XRAY_PORT}." >&2
   exit 1
 fi
 if [ -z "$SERVER_HOST" ] || [ -z "$SERVER_PORT" ]; then
@@ -102,8 +107,8 @@ else
     rm -f "$VLESSENC_OUTPUT_FILE"
     exit 1
   fi
-  VLESS_DECRYPTION=$(awk '/Authentication:[[:space:]]*ML-KEM-768,[[:space:]]*Post-Quantum/ { mlkem=1; next } mlkem && /"decryption"[[:space:]]*:/ { line=$0; sub(/^.*"decryption"[[:space:]]*:[[:space:]]*"/, "", line); sub(/".*$/, "", line); print line; exit }' "$VLESSENC_OUTPUT_FILE")
-  VLESS_ENCRYPTION=$(awk '/Authentication:[[:space:]]*ML-KEM-768,[[:space:]]*Post-Quantum/ { mlkem=1; next } mlkem && /"encryption"[[:space:]]*:/ { line=$0; sub(/^.*"encryption"[[:space:]]*:[[:space:]]*"/, "", line); sub(/".*$/, "", line); print line; exit }' "$VLESSENC_OUTPUT_FILE")
+  VLESS_DECRYPTION=$(awk '/Authentication:[[:space:]]*ML-KEM-768,[[:space:]]*Post-Quantum/ { mlkem=1; next } mlkem && /"decryption"[[:space:]]*:/ { line=$0; sub(/^.*"decryption"[[:space:]]*:[[:space:]]*"/, "", line); sub(/".*$/, "", line); print line; exit}' "$VLESSENC_OUTPUT_FILE")
+  VLESS_ENCRYPTION=$(awk '/Authentication:[[:space:]]*ML-KEM-768,[[:space:]]*Post-Quantum/ { mlkem=1; next } mlkem && /"encryption"[[:space:]]*:/ { line=$0; sub(/^.*"encryption"[[:space:]]*:[[:space:]]*"/, "", line); sub(/".*$/, "", line); print line; exit}' "$VLESSENC_OUTPUT_FILE")
   rm -f "$VLESSENC_OUTPUT_FILE"
   if [ -z "$VLESS_DECRYPTION" ] || [ -z "$VLESS_ENCRYPTION" ]; then
     echo "ERROR: unable to parse ML-KEM-768 VLESS Encryption output" >&2
