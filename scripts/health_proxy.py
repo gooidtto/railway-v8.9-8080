@@ -6,9 +6,9 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 LISTEN_HOST = "0.0.0.0"
-LISTEN_PORT = int(os.getenv("PUBLIC_HTTP_PORT", os.getenv("PORT", "8080")))
+LISTEN_PORT = int(os.getenv("GATEWAY_PORT", os.getenv("PUBLIC_HTTP_PORT", os.getenv("PORT", "8080"))))
 REALITY_HOST = "127.0.0.1"
-REALITY_PORT = int(os.getenv("XRAY_PORT", "10085"))
+REALITY_PORT = int(os.getenv("XRAY_PORT", "10087"))
 HTTP_XHTTP_HOST = "127.0.0.1"
 HTTP_XHTTP_PORT = int(os.getenv("XRAY_HTTP_PORT", "10086"))
 READY_FILE = os.getenv("XRAY_READY_FILE", "/data/.xray-ready")
@@ -179,8 +179,14 @@ def handle_http(c, method, path):
         return True
     head = method == "HEAD"
     if path == "/health":
+        # Railway's deployment health check verifies that the gateway process
+        # is alive. Xray readiness is reported separately at /ready so a brief
+        # startup window cannot mark an otherwise healthy deployment as failed.
+        c.sendall(response(200, "text/plain; charset=utf-8", "OK\n", head))
+        return True
+    if path == "/ready":
         ok = ready()
-        c.sendall(response(200 if ok else 503, "text/plain; charset=utf-8", "OK\n" if ok else "NOT READY\n", head))
+        c.sendall(response(200 if ok else 503, "text/plain; charset=utf-8", "READY\n" if ok else "NOT READY\n", head))
         return True
     if path.startswith("/sub/"):
         t = token()
