@@ -225,3 +225,6 @@ for outbound in client_outbounds:
 (data_dir / "reality-selected-sni.txt").write_text(sni + "\n", encoding="utf-8")
 summary = {"transports":["xhttp-https"] + (["xhttp-reality"] if reality_vless else []),"security":["tls"] + (["reality"] if reality_vless else []),"vless_encryption":"ML-KEM-768","xhttp_path":xhttp_path,"xhttp_mode":xhttp_mode,"sni":sni,"sni_mode":sni_mode,"server_host":host or None,"server_port":int(server_port) if server_port else None,"endpoint_source":endpoint_source,"gateway_port":gateway_port,"xray_port":xray_port,"xray_http_port":xray_http_port,"https_fallback_host":public_domain or None,"https_fallback_port":443 if public_domain else None,"subscription_endpoint":"/sub/<token>","node_count":len(nodes),"material_consistency":"validated"}
 (data_dir / "server-summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+print(f"REALITY SNI selected: {sni} (mode={sni_mode})")
+print(f"REALITY target: {target}")
+print(f"Subscription nodes generated: {len(nodes)}")
