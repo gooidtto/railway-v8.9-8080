@@ -1,16 +1,21 @@
 # syntax=docker/dockerfile:1
 ARG XRAY_VERSION=26.3.27
+ARG V89_BUILD_REVISION=v8.9-sni-matrix-r06-20260813
 FROM ghcr.io/xtls/xray-core:${XRAY_VERSION}@sha256:592ec4d11f656db95598d01e76dbcc6e002d67360b96a5436500a938230f52c7 AS xray
 FROM python:3.12-alpine3.22
 ARG XRAY_VERSION
+ARG V89_BUILD_REVISION
 ENV XRAY_VERSION=${XRAY_VERSION} PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 
-RUN mkdir -p /etc/xray /data /opt/xray/site /opt/xray/scripts
+RUN mkdir -p /etc/xray /data /opt/xray/site /opt/xray/scripts \
+    && printf '%s\n' "$V89_BUILD_REVISION" > /tmp/v89-build-revision
 COPY --from=xray /usr/local/bin/xray /usr/local/bin/xray
 COPY scripts/ /opt/xray/scripts/
 COPY web/site/ /opt/xray/site/
 
-RUN chmod 0755 /usr/local/bin/xray /opt/xray/scripts/*.sh /opt/xray/scripts/*.py \
+RUN printf 'V89_DOCKER_SOURCE_MARKER=%s\n' "$V89_BUILD_REVISION" \
+    && cp /tmp/v89-build-revision /opt/xray/.v89-build-revision \
+    && chmod 0755 /usr/local/bin/xray /opt/xray/scripts/*.sh /opt/xray/scripts/*.py \
     && chmod -R a+rX /opt/xray/site
 
 ENV PORT=8080 \
