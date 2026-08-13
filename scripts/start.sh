@@ -108,6 +108,7 @@ echo "Unified Railway ingress: HTTP/TCP gateway=$GATEWAY_PORT; private Xray REAL
 echo "TCP subscription endpoint: ${SERVER_HOST:-disabled}:${SERVER_PORT:-}" >&2
 echo "Railway TCP application port: ${RAILWAY_TCP_APPLICATION_PORT_VALUE:-unset}" >&2
 python3 /opt/xray/scripts/generate.py --no-subscription
+python3 /opt/xray/scripts/apply_reality_sni_pool.py
 python3 /opt/xray/scripts/material_manifest.py
 python3 /opt/xray/scripts/platform_capabilities.py >&2
 
