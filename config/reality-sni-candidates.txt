@@ -1,0 +1,21 @@
+# Candidate SNI values for development validation only.
+# This file is NOT loaded by production configuration.
+www.microsoft.com
+www.bing.com
+www.apple.com
+www.cloudflare.com
+www.canva.com
+www.notion.so
+www.nvidia.com
+www.figma.com
+aws.amazon.com
+store.epicgames.com
+www.ubisoft.com
+www.ea.com
+www.rockstargames.com
+www.gog.com
+www.minecraft.net
+www.unrealengine.com
+www.unity.com
+www.ign.com
+www.gamespot.com
