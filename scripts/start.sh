@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
 
+BUILD_ID="v8.9-dev-sni-matrix-20260813-01"
+SNI_MATRIX_VERSION="2"
+SUBSCRIPTION_GENERATOR_VERSION="3"
 DATA_DIR="${RAILWAY_VOLUME_MOUNT_PATH:-${DATA_DIR:-/data}}"
 PUBLIC_HTTP_PORT="${PUBLIC_HTTP_PORT:-8080}"
 GATEWAY_PORT="${GATEWAY_PORT:-$PUBLIC_HTTP_PORT}"
@@ -94,7 +97,7 @@ fi
 case "$SUBSCRIPTION_TOKEN" in *[!A-Za-z0-9_-]*|'') echo "ERROR: invalid subscription token" >&2; exit 1;; esac
 chmod 0600 "$SUB_TOKEN_FILE"
 
-export PORT GATEWAY_PORT PUBLIC_HTTP_PORT DATA_DIR XRAY_PORT XRAY_HTTP_PORT XRAY_LISTEN CONFIG REALITY_TARGET REALITY_SNI REALITY_FINGERPRINT REALITY_SNI_SERVER_MODE XHTTP_PATH XHTTP_MODE SHORT_ID UUID PRIVATE_KEY PUBLIC_KEY VLESS_DECRYPTION VLESS_ENCRYPTION SERVER_HOST SERVER_PORT SUBSCRIPTION_TOKEN TCP_PROXY_PROTOCOL XRAY_READY_FILE="$READY_FILE"
+export PORT GATEWAY_PORT PUBLIC_HTTP_PORT DATA_DIR XRAY_PORT XRAY_HTTP_PORT XRAY_LISTEN CONFIG REALITY_TARGET REALITY_SNI REALITY_FINGERPRINT REALITY_SNI_SERVER_MODE XHTTP_PATH XHTTP_MODE SHORT_ID UUID PRIVATE_KEY PUBLIC_KEY VLESS_DECRYPTION VLESS_ENCRYPTION SERVER_HOST SERVER_PORT SUBSCRIPTION_TOKEN TCP_PROXY_PROTOCOL XRAY_READY_FILE="$READY_FILE" BUILD_ID SNI_MATRIX_VERSION SUBSCRIPTION_GENERATOR_VERSION
 
 python3 /opt/xray/scripts/health_proxy.py & HEALTH_PID=$!
 cleanup(){
@@ -106,6 +109,9 @@ cleanup(){
 }
 trap cleanup INT TERM EXIT
 
+echo "V89_BUILD_ID=$BUILD_ID" >&2
+echo "V89_SNI_MATRIX_VERSION=$SNI_MATRIX_VERSION" >&2
+echo "V89_SUBSCRIPTION_GENERATOR_VERSION=$SUBSCRIPTION_GENERATOR_VERSION" >&2
 echo "Unified Railway ingress: HTTP/TCP gateway=$GATEWAY_PORT; private Xray REALITY=$XRAY_PORT; XHTTP=$XRAY_HTTP_PORT" >&2
 echo "TCP subscription endpoint: ${SERVER_HOST:-disabled}:${SERVER_PORT:-}" >&2
 echo "Railway TCP application port: ${RAILWAY_TCP_APPLICATION_PORT_VALUE:-unset}" >&2
@@ -113,6 +119,18 @@ echo "REALITY SNI server mode: $REALITY_SNI_SERVER_MODE" >&2
 python3 /opt/xray/scripts/generate.py --no-subscription
 python3 /opt/xray/scripts/apply_reality_sni_pool.py
 python3 /opt/xray/scripts/generate_reality_sni_matrix.py
+
+VLESS_FILE="$DATA_DIR/vless.txt"
+[ -s "$VLESS_FILE" ] || { echo "ERROR: subscription vless.txt missing or empty" >&2; exit 1; }
+TOTAL_NODES=$(awk 'NF {n++} END {print n+0}' "$VLESS_FILE")
+REALITY_NODES=$(grep -c 'security=reality' "$VLESS_FILE" || true)
+echo "V89_SUBSCRIPTION_TOTAL_NODES=$TOTAL_NODES" >&2
+echo "V89_SUBSCRIPTION_REALITY_NODES=$REALITY_NODES" >&2
+if [ "$REALITY_SNI_SERVER_MODE" = "multi" ]; then
+  EXPECTED_REALITY_NODES=$(python3 -c 'from scripts.select_reality_sni import candidate_list; print(len(candidate_list()))')
+  echo "V89_EXPECTED_REALITY_NODES=$EXPECTED_REALITY_NODES" >&2
+  [ "$REALITY_NODES" -eq "$EXPECTED_REALITY_NODES" ] || { echo "ERROR: SNI subscription mismatch: expected $EXPECTED_REALITY_NODES REALITY nodes, got $REALITY_NODES" >&2; exit 1; }
+fi
 python3 /opt/xray/scripts/material_manifest.py
 python3 /opt/xray/scripts/platform_capabilities.py >&2
 
