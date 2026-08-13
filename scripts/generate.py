@@ -3,7 +3,7 @@ import json
 import os
 import re
 from pathlib import Path
-from urllib.parse import quote, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 
 def env(name, default=None, required=False):
@@ -62,15 +62,6 @@ xhttp_mode = env("XHTTP_MODE", "auto")
 short_id = env("SHORT_ID", "50175c035ee132")
 subscription_token = env("SUBSCRIPTION_TOKEN", "")
 
-# Public endpoint precedence:
-# 1. Explicit XRAY_TCP_PROXY_HOST/PORT.
-# 2. Explicit SERVER_HOST/SERVER_PORT.
-# 3. Railway TCP proxy metadata. In the current single-port architecture the
-#    Railway TCP proxy targets the public gateway PORT. The gateway then
-#    dispatches TLS/REALITY to the private Xray listener. Therefore a Railway
-#    target matching GATEWAY_PORT is a valid REALITY endpoint; a target matching
-#    the old public HTTP port 8080 is rejected only when it is clearly distinct
-#    from the active gateway port.
 dedicated_host = env("XRAY_TCP_PROXY_HOST", "").strip()
 dedicated_port = env("XRAY_TCP_PROXY_PORT", "").strip()
 if bool(dedicated_host) != bool(dedicated_port):
@@ -97,12 +88,8 @@ if not (host and server_port) and railway_host and railway_port:
     if railway_target_port == str(gateway_port):
         host, server_port, endpoint_source = railway_host, railway_port, "railway-gateway-port"
     elif railway_target_port == str(xray_port):
-        # Compatibility with a deployment that exposes the private Xray port
-        # directly. The current gateway architecture does not require this.
         host, server_port, endpoint_source = railway_host, railway_port, "railway-xray-port"
     elif not railway_target_port:
-        # Railway can expose DOMAIN/PORT without target-port metadata. The
-        # gateway is the only public TCP ingress in this architecture.
         host, server_port, endpoint_source = railway_host, railway_port, "railway-port-metadata"
     else:
         host, server_port, endpoint_source = "", "", "rejected-unknown-port"
@@ -165,6 +152,31 @@ if public_domain:
 nodes = [n for n in (https_vless, reality_vless) if n]
 if not nodes:
     raise SystemExit("ERROR: no usable public subscription endpoint; set RAILWAY_PUBLIC_DOMAIN or XRAY_TCP_PROXY_HOST/PORT")
+
+
+def validate_vless_node(node, expected_encryption, expected_uuid, expected_reality=False):
+    parsed = urlparse(node)
+    if parsed.scheme != "vless" or not parsed.username or not parsed.hostname or not parsed.port:
+        raise SystemExit("ERROR: generated VLESS node is structurally invalid")
+    if parsed.username != expected_uuid:
+        raise SystemExit("ERROR: generated VLESS UUID does not match server UUID")
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    encryption = query.get("encryption", [""])[0]
+    if encryption != expected_encryption:
+        raise SystemExit("ERROR: generated VLESS encryption does not match server VLESS_ENCRYPTION")
+    if expected_reality:
+        for key, expected in (("security", "reality"), ("type", "xhttp"), ("pbk", public_key), ("sid", short_id), ("path", xhttp_path), ("mode", xhttp_mode), ("sni", sni)):
+            if query.get(key, [""])[0] != expected:
+                raise SystemExit(f"ERROR: generated REALITY node field {key} does not match server material")
+    else:
+        for key, expected in (("security", "tls"), ("type", "xhttp"), ("sni", public_domain), ("path", xhttp_path), ("mode", xhttp_mode)):
+            if query.get(key, [""])[0] != expected:
+                raise SystemExit(f"ERROR: generated HTTPS node field {key} does not match expected value")
+
+
+for node in nodes:
+    validate_vless_node(node, vless_encryption, uuid, expected_reality=("security=reality" in node))
+
 vless = "\n".join(nodes)
 (data_dir / "vless.txt").write_text(vless + "\n", encoding="utf-8")
 subscription = base64.b64encode((vless + "\n").encode()).decode() + "\n"
@@ -183,5 +195,22 @@ client = {"log":{"loglevel":"warning"},"inbounds":[{"listen":"127.0.0.1","port":
 with open(data_dir / "client.json", "w", encoding="utf-8") as f:
     json.dump(client, f, indent=2)
 os.chmod(data_dir / "client.json", 0o600)
-summary = {"transports":["xhttp-https"] + (["xhttp-reality"] if reality_vless else []),"security":["tls"] + (["reality"] if reality_vless else []),"vless_encryption":"ML-KEM-768","xhttp_path":xhttp_path,"xhttp_mode":xhttp_mode,"sni":sni,"server_host":host or None,"server_port":int(server_port) if server_port else None,"endpoint_source":endpoint_source,"gateway_port":gateway_port,"xray_port":xray_port,"xray_http_port":xray_http_port,"https_fallback_host":public_domain or None,"https_fallback_port":443 if public_domain else None,"subscription_endpoint":"/sub/<token>","node_count":len(nodes)}
+
+# Validate the client artifact against the exact material used by the server.
+for outbound in client_outbounds:
+    user = outbound["settings"]["vnext"][0]["users"][0]
+    if user.get("id") != uuid or user.get("encryption") != vless_encryption:
+        raise SystemExit("ERROR: client.json VLESS material diverges from server material")
+    stream = outbound["streamSettings"]
+    if stream.get("network") != "xhttp":
+        raise SystemExit("ERROR: client.json transport is not XHTTP")
+    if stream.get("security") == "reality":
+        reality = stream.get("realitySettings", {})
+        if reality.get("publicKey") != public_key or reality.get("shortId") != short_id or reality.get("serverName") != sni:
+            raise SystemExit("ERROR: client.json REALITY material diverges from server material")
+    xhttp = stream.get("xhttpSettings", {})
+    if xhttp.get("path") != xhttp_path or xhttp.get("mode") != xhttp_mode:
+        raise SystemExit("ERROR: client.json XHTTP material diverges from server material")
+
+summary = {"transports":["xhttp-https"] + (["xhttp-reality"] if reality_vless else []),"security":["tls"] + (["reality"] if reality_vless else []),"vless_encryption":"ML-KEM-768","xhttp_path":xhttp_path,"xhttp_mode":xhttp_mode,"sni":sni,"server_host":host or None,"server_port":int(server_port) if server_port else None,"endpoint_source":endpoint_source,"gateway_port":gateway_port,"xray_port":xray_port,"xray_http_port":xray_http_port,"https_fallback_host":public_domain or None,"https_fallback_port":443 if public_domain else None,"subscription_endpoint":"/sub/<token>","node_count":len(nodes),"material_consistency":"validated"}
 (data_dir / "server-summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
