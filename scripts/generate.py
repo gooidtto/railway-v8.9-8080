@@ -5,6 +5,8 @@ import re
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
+from scripts.select_reality_sni import candidate_list, select_sni
+
 
 def env(name, default=None, required=False):
     value = os.getenv(name, default)
@@ -55,13 +57,22 @@ def normalize_sni(value, fallback):
 
 
 target = normalize_reality_target(env("REALITY_TARGET", "www.cloudflare.com:443"))
-sni = normalize_sni(env("REALITY_SNI", target.rsplit(":", 1)[0]), target.rsplit(":", 1)[0])
+configured_sni = normalize_sni(env("REALITY_SNI", target.rsplit(":", 1)[0]), target.rsplit(":", 1)[0])
 fingerprint = env("REALITY_FINGERPRINT", "chrome")
 xhttp_path = env("XHTTP_PATH", "/xhttp")
 xhttp_mode = env("XHTTP_MODE", "auto")
 short_id = env("SHORT_ID", "50175c035ee132")
 subscription_token = env("SUBSCRIPTION_TOKEN", "")
 
+sni_mode = env("REALITY_SNI_MODE", "static").strip().lower()
+if sni_mode not in {"static", "random"}:
+    raise SystemExit("ERROR: REALITY_SNI_MODE must be static or random")
+if sni_mode == "random":
+    sni = select_sni(candidate_list(), "random", configured_sni)
+else:
+    sni = configured_sni
+
+# Public endpoint precedence: explicit override, then Railway TCP Proxy metadata.
 dedicated_host = env("XRAY_TCP_PROXY_HOST", "").strip()
 dedicated_port = env("XRAY_TCP_PROXY_PORT", "").strip()
 if bool(dedicated_host) != bool(dedicated_port):
@@ -196,7 +207,6 @@ with open(data_dir / "client.json", "w", encoding="utf-8") as f:
     json.dump(client, f, indent=2)
 os.chmod(data_dir / "client.json", 0o600)
 
-# Validate the client artifact against the exact material used by the server.
 for outbound in client_outbounds:
     user = outbound["settings"]["vnext"][0]["users"][0]
     if user.get("id") != uuid or user.get("encryption") != vless_encryption:
@@ -212,5 +222,6 @@ for outbound in client_outbounds:
     if xhttp.get("path") != xhttp_path or xhttp.get("mode") != xhttp_mode:
         raise SystemExit("ERROR: client.json XHTTP material diverges from server material")
 
-summary = {"transports":["xhttp-https"] + (["xhttp-reality"] if reality_vless else []),"security":["tls"] + (["reality"] if reality_vless else []),"vless_encryption":"ML-KEM-768","xhttp_path":xhttp_path,"xhttp_mode":xhttp_mode,"sni":sni,"server_host":host or None,"server_port":int(server_port) if server_port else None,"endpoint_source":endpoint_source,"gateway_port":gateway_port,"xray_port":xray_port,"xray_http_port":xray_http_port,"https_fallback_host":public_domain or None,"https_fallback_port":443 if public_domain else None,"subscription_endpoint":"/sub/<token>","node_count":len(nodes),"material_consistency":"validated"}
+(data_dir / "reality-selected-sni.txt").write_text(sni + "\n", encoding="utf-8")
+summary = {"transports":["xhttp-https"] + (["xhttp-reality"] if reality_vless else []),"security":["tls"] + (["reality"] if reality_vless else []),"vless_encryption":"ML-KEM-768","xhttp_path":xhttp_path,"xhttp_mode":xhttp_mode,"sni":sni,"sni_mode":sni_mode,"server_host":host or None,"server_port":int(server_port) if server_port else None,"endpoint_source":endpoint_source,"gateway_port":gateway_port,"xray_port":xray_port,"xray_http_port":xray_http_port,"https_fallback_host":public_domain or None,"https_fallback_port":443 if public_domain else None,"subscription_endpoint":"/sub/<token>","node_count":len(nodes),"material_consistency":"validated"}
 (data_dir / "server-summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
