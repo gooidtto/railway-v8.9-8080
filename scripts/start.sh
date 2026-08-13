@@ -2,9 +2,6 @@
 set -eu
 
 DATA_DIR="${RAILWAY_VOLUME_MOUNT_PATH:-${DATA_DIR:-/data}}"
-# Unified Railway ingress test: both the public HTTP domain and the Railway
-# TCP Proxy target the same application port (8080). health_proxy.py detects
-# HTTP versus TLS/REALITY on that single TCP listener and dispatches internally.
 PUBLIC_HTTP_PORT="${PUBLIC_HTTP_PORT:-8080}"
 GATEWAY_PORT="${GATEWAY_PORT:-$PUBLIC_HTTP_PORT}"
 PORT="$GATEWAY_PORT"
@@ -111,6 +108,8 @@ echo "Unified Railway ingress: HTTP/TCP gateway=$GATEWAY_PORT; private Xray REAL
 echo "TCP subscription endpoint: ${SERVER_HOST:-disabled}:${SERVER_PORT:-}" >&2
 echo "Railway TCP application port: ${RAILWAY_TCP_APPLICATION_PORT_VALUE:-unset}" >&2
 python3 /opt/xray/scripts/generate.py --no-subscription
+python3 /opt/xray/scripts/material_manifest.py
+python3 /opt/xray/scripts/platform_capabilities.py >&2
 
 xray run -test -config "$CONFIG"
 echo "Starting Xray on ${XRAY_LISTEN}:$XRAY_PORT; unified gateway listens on 0.0.0.0:$GATEWAY_PORT" >&2
