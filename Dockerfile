@@ -8,14 +8,14 @@ ARG V89_BUILD_REVISION
 ENV XRAY_VERSION=${XRAY_VERSION} PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 
 RUN mkdir -p /etc/xray /data /opt/xray/site /opt/xray/scripts \
-    && printf '%s\n' "$V89_BUILD_REVISION" > /tmp/v89-build-revision \
-    && printf 'V89_DOCKER_SOURCE_MARKER=%s\n' "$V89_BUILD_REVISION"
+    && printf '%s\n' "$V89_BUILD_REVISION" > /tmp/v89-build-revision
 COPY --from=xray /usr/local/bin/xray /usr/local/bin/xray
 COPY scripts/ /opt/xray/scripts/
 COPY web/site/ /opt/xray/site/
-COPY --from=0 /tmp/v89-build-revision /opt/xray/.v89-build-revision
 
-RUN chmod 0755 /usr/local/bin/xray /opt/xray/scripts/*.sh /opt/xray/scripts/*.py \
+RUN printf 'V89_DOCKER_SOURCE_MARKER=%s\n' "$V89_BUILD_REVISION" \
+    && cp /tmp/v89-build-revision /opt/xray/.v89-build-revision \
+    && chmod 0755 /usr/local/bin/xray /opt/xray/scripts/*.sh /opt/xray/scripts/*.py \
     && chmod -R a+rX /opt/xray/site
 
 ENV PORT=8080 \
