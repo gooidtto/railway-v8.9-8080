@@ -2,9 +2,14 @@ name: dev-regression
 
 on:
   push:
-    branches: ["dev/v8.9-next"]
+    branches:
+      - "dev/v8.9-next"
+      - "dev/v8.9-mlkem-consistency"
   pull_request:
-    branches: ["dev/v8.9-next", "main"]
+    branches:
+      - "dev/v8.9-next"
+      - "dev/v8.9-mlkem-consistency"
+      - "main"
 
 jobs:
   test:
@@ -16,5 +21,9 @@ jobs:
           python-version: "3.12"
       - name: Compile Python sources
         run: python -m compileall -q scripts tests
+      - name: Install test runner
+        run: python -m pip install pytest
       - name: Run gateway regression tests
         run: python -m pytest -q tests/test_health_proxy.py
+      - name: Run subscription material consistency tests
+        run: python -m pytest -q tests/test_generate_consistency.py
