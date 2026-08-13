@@ -12,6 +12,7 @@ CONFIG="${XRAY_CONFIG:-/etc/xray/config.json}"
 REALITY_TARGET="${REALITY_TARGET:-www.cloudflare.com:443}"
 REALITY_SNI="${REALITY_SNI:-${REALITY_TARGET%%:*}}"
 REALITY_FINGERPRINT="${REALITY_FINGERPRINT:-chrome}"
+REALITY_SNI_SERVER_MODE="${REALITY_SNI_SERVER_MODE:-multi}"
 XHTTP_PATH="${XHTTP_PATH:-/xhttp}"
 XHTTP_MODE="${XHTTP_MODE:-auto}"
 SHORT_ID="${SHORT_ID:-50175c035ee132}"
@@ -42,6 +43,7 @@ XRAY_PID=""
 case "$SHORT_ID" in ''|*[!0-9a-fA-F]*) echo "ERROR: SHORT_ID must be hexadecimal" >&2; exit 1;; esac
 if [ $(( ${#SHORT_ID} % 2 )) -ne 0 ] || [ ${#SHORT_ID} -gt 16 ]; then echo "ERROR: SHORT_ID length invalid" >&2; exit 1; fi
 case "$XHTTP_PATH" in /*) ;; *) echo "ERROR: XHTTP_PATH must start with /" >&2; exit 1;; esac
+case "$REALITY_SNI_SERVER_MODE" in single|multi) ;; *) echo "ERROR: REALITY_SNI_SERVER_MODE must be single or multi" >&2; exit 1;; esac
 mkdir -p "$DATA_DIR" "$(dirname "$CONFIG")"
 chmod 0700 "$DATA_DIR" 2>/dev/null || true
 rm -f "$READY_FILE"
@@ -92,7 +94,7 @@ fi
 case "$SUBSCRIPTION_TOKEN" in *[!A-Za-z0-9_-]*|'') echo "ERROR: invalid subscription token" >&2; exit 1;; esac
 chmod 0600 "$SUB_TOKEN_FILE"
 
-export PORT GATEWAY_PORT PUBLIC_HTTP_PORT DATA_DIR XRAY_PORT XRAY_HTTP_PORT XRAY_LISTEN CONFIG REALITY_TARGET REALITY_SNI REALITY_FINGERPRINT XHTTP_PATH XHTTP_MODE SHORT_ID UUID PRIVATE_KEY PUBLIC_KEY VLESS_DECRYPTION VLESS_ENCRYPTION SERVER_HOST SERVER_PORT SUBSCRIPTION_TOKEN TCP_PROXY_PROTOCOL XRAY_READY_FILE="$READY_FILE"
+export PORT GATEWAY_PORT PUBLIC_HTTP_PORT DATA_DIR XRAY_PORT XRAY_HTTP_PORT XRAY_LISTEN CONFIG REALITY_TARGET REALITY_SNI REALITY_FINGERPRINT REALITY_SNI_SERVER_MODE XHTTP_PATH XHTTP_MODE SHORT_ID UUID PRIVATE_KEY PUBLIC_KEY VLESS_DECRYPTION VLESS_ENCRYPTION SERVER_HOST SERVER_PORT SUBSCRIPTION_TOKEN TCP_PROXY_PROTOCOL XRAY_READY_FILE="$READY_FILE"
 
 python3 /opt/xray/scripts/health_proxy.py & HEALTH_PID=$!
 cleanup(){
@@ -107,6 +109,7 @@ trap cleanup INT TERM EXIT
 echo "Unified Railway ingress: HTTP/TCP gateway=$GATEWAY_PORT; private Xray REALITY=$XRAY_PORT; XHTTP=$XRAY_HTTP_PORT" >&2
 echo "TCP subscription endpoint: ${SERVER_HOST:-disabled}:${SERVER_PORT:-}" >&2
 echo "Railway TCP application port: ${RAILWAY_TCP_APPLICATION_PORT_VALUE:-unset}" >&2
+echo "REALITY SNI server mode: $REALITY_SNI_SERVER_MODE" >&2
 python3 /opt/xray/scripts/generate.py --no-subscription
 python3 /opt/xray/scripts/apply_reality_sni_pool.py
 python3 /opt/xray/scripts/generate_reality_sni_matrix.py
