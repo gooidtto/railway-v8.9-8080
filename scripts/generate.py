@@ -40,7 +40,7 @@ target = normalize_target(env("REALITY_TARGET", "www.cloudflare.com:443")); targ
 configured_sni = normalize_sni(env("REALITY_SNI", target_host), target_host)
 fingerprint = env("REALITY_FINGERPRINT", "chrome"); xhttp_path = env("XHTTP_PATH", "/xhttp"); xhttp_mode = env("XHTTP_MODE", "auto")
 short_id = env("SHORT_ID", "50175c035ee132"); subscription_token = env("SUBSCRIPTION_TOKEN", "")
-sni_mode = env("REALITY_SNI_MODE", "static").strip().lower(); sni_server_mode = env("REALITY_SNI_SERVER_MODE", "single").strip().lower()
+sni_mode = env("REALITY_SNI_MODE", "static").strip().lower(); sni_server_mode = env("REALITY_SNI_SERVER_MODE", "multi").strip().lower()
 if sni_mode not in {"static", "random"}: raise SystemExit("ERROR: REALITY_SNI_MODE must be static or random")
 if sni_server_mode not in {"single", "multi"}: raise SystemExit("ERROR: REALITY_SNI_SERVER_MODE must be single or multi")
 pool = candidate_list()
@@ -74,7 +74,7 @@ for filename, value in (("vless_decryption.txt", vless_decryption), ("vless_encr
 
 def make_reality_node(sni):
     if not (host and server_port): return ""
-    return (f"vless://{uuid}@{host}:{server_port}/?encryption={quote(vless_encryption, safe='')}&security=reality&type=xhttp&fp={quote(fingerprint, safe='')}&sni={quote(sni, safe='')}&pbk={quote(public_key, safe='')}&sid={quote(short_id, safe='')}&path={quote(xhttp_path, safe='')}&mode={quote(xhttp_mode, safe='')}#railway-xhttp-reality-mlkem768")
+    return (f"vless://{uuid}@{host}:{server_port}/?encryption={quote(vless_encryption, safe='')}&security=reality&type=xhttp&fp={quote(fingerprint, safe='')}&sni={quote(sni, safe='')}&pbk={quote(public_key, safe='')}&sid={quote(short_id, safe='')}&path={quote(xhttp_path, safe='')}&mode={quote(xhttp_mode, safe='')}#railway-xhttp-reality-mlkem768-{sni}")
 
 def make_https_node():
     if not public_domain: return ""
@@ -103,5 +103,6 @@ summary = {"transports":["xhttp-https"] + (["xhttp-reality"] if host and server_
 print(f"REALITY SNI selected: {selected_sni} (mode={sni_mode})")
 print(f"REALITY SNI server mode: {sni_server_mode}")
 print(f"REALITY SNI serverNames: {len(server_names)}")
+for index, sni in enumerate(server_names, 1): print(f"REALITY SNI node {index:02d}: {sni}")
 print(f"Subscription REALITY nodes generated: {len(reality_nodes)}")
 print(f"Subscription nodes generated: {len(nodes)}")
